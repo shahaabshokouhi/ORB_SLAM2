@@ -45,7 +45,6 @@ void Optimizer::GlobalBundleAdjustemnt(Map* pMap, int nIterations, bool* pbStopF
     BundleAdjustment(vpKFs,vpMP,nIterations,pbStopFlag, nLoopKF, bRobust);
 }
 
-
 void Optimizer::BundleAdjustment(const vector<KeyFrame *> &vpKFs, const vector<MapPoint *> &vpMP,
                                  int nIterations, bool* pbStopFlag, const unsigned long nLoopKF, const bool bRobust)
 {
@@ -88,6 +87,7 @@ void Optimizer::BundleAdjustment(const vector<KeyFrame *> &vpKFs, const vector<M
     // Set MapPoint vertices
     for(size_t i=0; i<vpMP.size(); i++)
     {
+
         MapPoint* pMP = vpMP[i];
         if(pMP->isBad())
             continue;
@@ -184,6 +184,7 @@ void Optimizer::BundleAdjustment(const vector<KeyFrame *> &vpKFs, const vector<M
     }
 
     // Optimize!
+
     optimizer.initializeOptimization();
     optimizer.optimize(nIterations);
 
@@ -212,6 +213,7 @@ void Optimizer::BundleAdjustment(const vector<KeyFrame *> &vpKFs, const vector<M
     //Points
     for(size_t i=0; i<vpMP.size(); i++)
     {
+
         if(vbNotIncludedMP[i])
             continue;
 
@@ -223,16 +225,22 @@ void Optimizer::BundleAdjustment(const vector<KeyFrame *> &vpKFs, const vector<M
 
         if(nLoopKF==0)
         {
+
             pMP->SetWorldPos(Converter::toCvMat(vPoint->estimate()));
+
             pMP->UpdateNormalAndDepth();
+
         }
         else
         {
+
             pMP->mPosGBA.create(3,1,CV_32F);
             Converter::toCvMat(vPoint->estimate()).copyTo(pMP->mPosGBA);
             pMP->mnBAGlobalForKF = nLoopKF;
         }
+
     }
+
 
 }
 
