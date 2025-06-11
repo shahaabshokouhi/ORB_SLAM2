@@ -465,7 +465,9 @@ void Frame::ComputeImageBounds(const cv::Mat &imLeft)
 
 void Frame::ComputeStereoMatches()
 {
+    // matched x coordinates in the right image (-1 if no match)
     mvuRight = vector<float>(N,-1.0f);
+    // matched depth (-1 if no match)
     mvDepth = vector<float>(N,-1.0f);
 
     const int thOrbDist = (ORBmatcher::TH_HIGH+ORBmatcher::TH_LOW)/2;

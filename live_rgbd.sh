@@ -1,0 +1,1 @@
+./Examples/rgbd_live Vocabulary/ORBvoc.txt Examples/RGB-D/realsense.yaml

@@ -23,6 +23,7 @@
 #include<algorithm>
 #include<fstream>
 #include<chrono>
+#include <librealsense2/rs.hpp>     // RealSense SDK
 
 #include<opencv2/core/core.hpp>
 
