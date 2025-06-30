@@ -105,24 +105,30 @@ int main(int argc, char** argv)
                         (void*)depth_frame.get_data(),
                         cv::Mat::AUTO_STEP);
 
-        // f) (Optional) Colorize depth for display
-        // rs2::frame depth_colorized = color_map.process(depth_frame);
-        // cv::Mat depth_color_mat(cv::Size(depth_colorized.as<rs2::video_frame>().get_width(),
-        //                                  depth_colorized.as<rs2::video_frame>().get_height()),
-        //                         CV_8UC3,
-        //                         (void*)depth_colorized.get_data(),
-        //                         cv::Mat::AUTO_STEP);
-
-        // g) Show the live RGB and colorized-depth (for debugging)
-        // cv::imshow(color_window, imRGB);
-        // cv::imshow(depth_window, depth_color_mat);
+        int cx = depth_w / 2; // Assuming depth and color frames are aligned
+        int cy = depth_h / 2;
+        float center_depth = depth_frame.get_distance(cx, cy);
+        float raw_depth = imDepth.at<uint16_t>(cy, cx);
+        std::cout << "Center pixel depth: " << center_depth << " meters, raw depth: " << raw_depth << " mm" << std::endl;
+         // Loop over every pixel (u, v):
+        cv::Mat depth_meter = cv::Mat(depth_h, depth_w, CV_32FC1); // one float per pixel
+        for (int v = 0; v < depth_h; v++)
+        {
+            for (int u = 0; u < depth_w; u++)
+            {
+                // get_distance(u,v) is valid on rs2::depth_frame
+                float z = depth_frame.get_distance(u, v);
+                depth_meter.at<float>(v, u) = z; 
+                // z is in meters. If no depth, z == 0.
+            }
+        }
 
         // h) Compute timestamp for this frame (in seconds)
         //    RealSense's get_timestamp() returns milliseconds since start.
         double tframe = depth_frame.get_timestamp() / 1000.0;
 
         // i) Pass the synchronized RGB-D frame to ORB_SLAM2
-        SLAM.TrackRGBD(imRGB, imDepth, tframe);
+        SLAM.TrackRGBD(imRGB, depth_meter, tframe);
 
         // j) Handle exit key
         int key = cv::waitKey(1);
