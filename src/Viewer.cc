@@ -25,13 +25,13 @@
 
 namespace ORB_SLAM2
 {
-
+long unsigned int Viewer::mnViewerCounter = 0;
 Viewer::Viewer(System* pSystem, FrameDrawer *pFrameDrawer, MapDrawer *pMapDrawer, Tracking *pTracking, const string &strSettingPath):
     mpSystem(pSystem), mpFrameDrawer(pFrameDrawer),mpMapDrawer(pMapDrawer), mpTracker(pTracking),
     mbFinishRequested(false), mbFinished(true), mbStopped(true), mbStopRequested(false)
 {
     cv::FileStorage fSettings(strSettingPath, cv::FileStorage::READ);
-
+    mnId = mnViewerCounter++;
     float fps = fSettings["Camera.fps"];
     if(fps<1)
         fps=30;
@@ -55,8 +55,8 @@ void Viewer::Run()
 {
     mbFinished = false;
     mbStopped = false;
-
-    pangolin::CreateWindowAndBind("ORB-SLAM2: Map Viewer",1024,768);
+    std::string mapViewerWinName = "ORB-SLAM2: Map Viewer" + std::to_string(mnId);
+    pangolin::CreateWindowAndBind(mapViewerWinName,1024,768);
 
     // 3D Mouse handler requires depth testing to be enabled
     glEnable(GL_DEPTH_TEST);
@@ -64,15 +64,15 @@ void Viewer::Run()
     // Issue specific OpenGl we might need
     glEnable (GL_BLEND);
     glBlendFunc (GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-
-    pangolin::CreatePanel("menu").SetBounds(0.0,1.0,0.0,pangolin::Attach::Pix(175));
-    pangolin::Var<bool> menuFollowCamera("menu.Follow Camera",true,true);
-    pangolin::Var<bool> menuShowPoints("menu.Show Points",true,true);
-    pangolin::Var<bool> menuShowKeyFrames("menu.Show KeyFrames",true,true);
-    pangolin::Var<bool> menuShowGraph("menu.Show Graph",true,true);
-    pangolin::Var<bool> menuLocalizationMode("menu.Localization Mode",false,true);
-    pangolin::Var<bool> menuReset("menu.Reset",false,false);
-
+    std::string panelName = "menu" + std::to_string(mnId);
+    pangolin::CreatePanel(panelName).SetBounds(0.0,1.0,0.0,pangolin::Attach::Pix(175));
+    pangolin::Var<bool> menuFollowCamera(panelName + ".Follow Camera",true,true);
+    pangolin::Var<bool> menuShowPoints(panelName + ".Show Points",true,true);
+    pangolin::Var<bool> menuHighObsMPOnly(panelName + ".High-Quality MPs", false, true);
+    pangolin::Var<bool> menuShowKeyFrames(panelName + ".Show KeyFrames",true,true);
+    pangolin::Var<bool> menuShowGraph(panelName + ".Show Graph",true,true);
+    pangolin::Var<bool> menuLocalizationMode(panelName + ".Localization Mode",false,true);
+    pangolin::Var<bool> menuReset(panelName + ".Reset",false,false);
     // Define Camera Render Object (for view / scene browsing)
     pangolin::OpenGlRenderState s_cam(
                 pangolin::ProjectionMatrix(1024,768,mViewpointF,mViewpointF,512,389,0.1,1000),
@@ -86,8 +86,8 @@ void Viewer::Run()
 
     pangolin::OpenGlMatrix Twc;
     Twc.SetIdentity();
-
-    cv::namedWindow("ORB-SLAM2: Current Frame");
+    std::string frameViewerWinName = "ORB-SLAM2: Current Frame" + std::to_string(mnId);
+    cv::namedWindow(frameViewerWinName);
 
     bool bFollow = true;
     bool bLocalizationMode = false;
@@ -130,12 +130,23 @@ void Viewer::Run()
         if(menuShowKeyFrames || menuShowGraph)
             mpMapDrawer->DrawKeyFrames(menuShowKeyFrames,menuShowGraph);
         if(menuShowPoints)
-            mpMapDrawer->DrawMapPoints();
+        {
+            if (menuHighObsMPOnly)
+            {
+                auto vHigh = mpSystem->mpMap->GetHighObsMapPoints();
+                mpMapDrawer->DrawMapPoints(vHigh);
+            }
+            else
+            {
+                mpMapDrawer->DrawMapPoints();
+            }
+            
+        }
 
         pangolin::FinishFrame();
 
         cv::Mat im = mpFrameDrawer->DrawFrame();
-        cv::imshow("ORB-SLAM2: Current Frame",im);
+        cv::imshow(frameViewerWinName,im);
         cv::waitKey(mT);
 
         if(menuReset)

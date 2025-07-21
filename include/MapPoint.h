@@ -42,6 +42,13 @@ public:
     MapPoint(const cv::Mat &Pos, KeyFrame* pRefKF, Map* pMap);
     MapPoint(const cv::Mat &Pos,  Map* pMap, Frame* pFrame, const int &idxF);
 
+    /**
+     * Copy constructor: deep-copy world position, descriptor, observations, etc.
+     * For transfer purposes; reuses original ID and does not generate a new one.
+     */
+    MapPoint(MapPoint& other);
+
+
     void SetWorldPos(const cv::Mat &Pos);
     cv::Mat GetWorldPos();
 
@@ -109,8 +116,9 @@ public:
     cv::Mat mPosGBA;
     long unsigned int mnBAGlobalForKF;
 
-
     static std::mutex mGlobalMutex;
+
+    bool mbSentToOther;
 
 protected:    
 

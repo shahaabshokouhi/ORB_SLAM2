@@ -488,4 +488,17 @@ vector<cv::KeyPoint> System::GetTrackedKeyPointsUn()
     return mTrackedKeyPointsUn;
 }
 
+void System::ImportHighQualityMapPoints(
+    const vector<MapPoint*> &vMPs)
+{
+    // Lock the import buffer
+    std::unique_lock<std::mutex> lock(mMutexImport);
+
+    for (MapPoint* pSrcMP : vMPs){
+        MapPoint* pMPi = new MapPoint(*pSrcMP);
+        // pMPi->SetMap(mpMap);
+        mvpImportedMapPoints.push_back(pMPi);
+    }
+}
+
 } //namespace ORB_SLAM

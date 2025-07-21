@@ -112,6 +112,14 @@ public:
     // See format details at: http://www.cvlibs.net/datasets/kitti/eval_odometry.php
     void SaveTrajectoryKITTI(const string &filename);
 
+    // This part is under contruction to multicam SLAM
+    // import into a staging area (no merge)
+    void ImportHighQualityMapPoints(
+        const std::vector<MapPoint*> &vMPs);
+    
+    // once user confirms, merge the staged points into the live map
+    // void MergeImportedMapPoints();
+
     // TODO: Save/Load functions
     // SaveMap(const string &filename);
     // LoadMap(const string &filename);
@@ -121,6 +129,8 @@ public:
     int GetTrackingState();
     std::vector<MapPoint*> GetTrackedMapPoints();
     std::vector<cv::KeyPoint> GetTrackedKeyPointsUn();
+    Map* mpMap;
+
 
 private:
 
@@ -134,7 +144,7 @@ private:
     KeyFrameDatabase* mpKeyFrameDatabase;
 
     // Map structure that stores the pointers to all KeyFrames and MapPoints.
-    Map* mpMap;
+    // Map* mpMap;
 
     // Tracker. It receives a frame and computes the associated camera pose.
     // It also decides when to insert a new keyframe, create some new MapPoints and
@@ -174,6 +184,11 @@ private:
     std::vector<MapPoint*> mTrackedMapPoints;
     std::vector<cv::KeyPoint> mTrackedKeyPointsUn;
     std::mutex mMutexState;
+
+    // Multicam SLAM
+    std::vector<MapPoint*> mvpImportedMapPoints;
+    std::mutex mMutexImport;
+    std::mutex mMutexMap;
 };
 
 }// namespace ORB_SLAM

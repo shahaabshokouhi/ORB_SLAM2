@@ -141,7 +141,9 @@ void FrameDrawer::DrawTextInfo(cv::Mat &im, int nState, cv::Mat &imText)
             s << "LOCALIZATION | ";
         int nKFs = mpMap->KeyFramesInMap();
         int nMPs = mpMap->MapPointsInMap();
-        s << "KFs: " << nKFs << ", MPs: " << nMPs << ", Matches: " << mnTracked;
+        int nHighObsMps = mpMap->GetSizeHighObs();
+
+        s << "KFs: " << nKFs << ", MPs: " << nMPs << ", Matches: " << mnTracked << ", High Obs MPs: " << nHighObsMps;
         if(mnTrackedVO>0)
             s << ", + VO matches: " << mnTrackedVO;
     }

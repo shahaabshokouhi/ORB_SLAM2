@@ -261,4 +261,17 @@ void MapDrawer::GetCurrentOpenGLCameraMatrix(pangolin::OpenGlMatrix &M)
         M.SetIdentity();
 }
 
+void MapDrawer::DrawMapPoints(const vector<MapPoint*>& vMPs)
+{
+    glPointSize(mPointSize);
+    glBegin(GL_POINTS);
+    glColor3f(0.0f,1.0f,0.0f);
+    for (MapPoint* pMP: vMPs)
+    {
+        cv::Mat pos = pMP->GetWorldPos();
+        glVertex3f(pos.at<float>(0), pos.at<float>(1), pos.at<float>(2));
+    }
+    glEnd();
+}
+
 } //namespace ORB_SLAM

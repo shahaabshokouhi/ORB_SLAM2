@@ -45,26 +45,32 @@ int main(int argc, char** argv)
     // 1) Initialize ORB_SLAM2 in RGBD mode
     string strVocFile = string(argv[1]);
     string strSettingsFile = string(argv[2]);
-    ORB_SLAM2::System SLAM(strVocFile, strSettingsFile, ORB_SLAM2::System::RGBD, true);
+    ORB_SLAM2::System SLAM_1(strVocFile, strSettingsFile, ORB_SLAM2::System::RGBD, true);
+    ORB_SLAM2::System SLAM_2(strVocFile, strSettingsFile, ORB_SLAM2::System::RGBD, true);
 
     // 2) Set up RealSense pipeline to capture both depth & color
-    rs2::pipeline pipe;
-    rs2::config cfg;
-    cfg.enable_stream(RS2_STREAM_DEPTH, 640, 480, RS2_FORMAT_Z16, 30);
-    cfg.enable_stream(RS2_STREAM_COLOR, 640, 480, RS2_FORMAT_RGB8, 30);
-    rs2::pipeline_profile profile = pipe.start(cfg);
+    std::vector<std::string> serials = {
+        "102422077153",
+        "923322071768"
+    };
+    
+    rs2::pipeline pipe_1;
+    rs2::config cfg_1;
+    cfg_1.enable_device(serials[0]);
+    cfg_1.enable_stream(RS2_STREAM_DEPTH, 640, 480, RS2_FORMAT_Z16, 30);
+    cfg_1.enable_stream(RS2_STREAM_COLOR, 640, 480, RS2_FORMAT_RGB8, 30);
+    rs2::pipeline_profile profile_1 = pipe_1.start(cfg_1);
+
+    rs2::pipeline pipe_2;
+    rs2::config cfg_2;
+    cfg_2.enable_device(serials[1]);
+    cfg_1.enable_stream(RS2_STREAM_DEPTH, 640, 480, RS2_FORMAT_Z16, 30);
+    cfg_1.enable_stream(RS2_STREAM_COLOR, 640, 480, RS2_FORMAT_RGB8, 30);
+    rs2::pipeline_profile profile_2 = pipe_2.start(cfg_2);
 
     // 3) Create an align object so depth→color is registered
     rs2::align align_to_color(RS2_STREAM_COLOR);
 
-    // 4) For colorizing the depth (for on‐screen display only)
-    // rs2::colorizer color_map;
-
-    // 5) Prepare OpenCV windows (optional, but helpful to debug)
-    // const char* color_window = "ORB_SLAM2: RGB";
-    // const char* depth_window = "ORB_SLAM2: Depth (Colorized)";
-    // cv::namedWindow(color_window, cv::WINDOW_AUTOSIZE);
-    // cv::namedWindow(depth_window, cv::WINDOW_AUTOSIZE);
 
     cout << endl << "-------" << endl;
     cout << "Starting live RGB-D capture..." << endl;
@@ -74,62 +80,73 @@ int main(int argc, char** argv)
     while(true)
     {
         // a) Wait for the next set of frames
-        rs2::frameset frames = pipe.wait_for_frames();
+        rs2::frameset frames_1 = pipe_1.wait_for_frames();
+        rs2::frameset frames_2 = pipe_2.wait_for_frames();
 
         // b) Align depth frame to color frame
-        rs2::frameset aligned = align_to_color.process(frames);
+        rs2::frameset aligned_1 = align_to_color.process(frames_1);
+        rs2::frameset aligned_2 = align_to_color.process(frames_2);
 
         // c) Extract aligned depth and color
-        rs2::depth_frame depth_frame = aligned.get_depth_frame();
-        rs2::video_frame color_frame = aligned.get_color_frame();
+        rs2::depth_frame depth_frame_1 = aligned_1.get_depth_frame();
+        rs2::video_frame color_frame_1 = aligned_1.get_color_frame();
 
-        if(!depth_frame || !color_frame)
+        rs2::depth_frame depth_frame_2 = aligned_2.get_depth_frame();
+        rs2::video_frame color_frame_2 = aligned_2.get_color_frame();
+
+        if(!depth_frame_1 || !color_frame_1 || !depth_frame_2 || !color_frame_2)
         {
             cerr << "Warning: could not retrieve depth or color frame." << endl;
             continue;
         }
 
         // d) Convert color_frame → cv::Mat (BGR8)
-        int color_w = color_frame.get_width();
-        int color_h = color_frame.get_height();
-        cv::Mat imRGB(cv::Size(color_w, color_h),
+        int color_w = color_frame_1.get_width();
+        int color_h = color_frame_1.get_height();
+        cv::Mat imRGB_1(cv::Size(color_w, color_h),
                       CV_8UC3,
-                      (void*)color_frame.get_data(),
+                      (void*)color_frame_1.get_data(),
+                      cv::Mat::AUTO_STEP);
+        cv::Mat imRGB_2(cv::Size(color_w, color_h),
+                      CV_8UC3,
+                      (void*)color_frame_2.get_data(),
                       cv::Mat::AUTO_STEP);
 
         // e) Convert depth_frame → cv::Mat (CV_16UC1, depth in millimeters)
-        int depth_w = depth_frame.get_width();
-        int depth_h = depth_frame.get_height();
-        cv::Mat imDepth(cv::Size(depth_w, depth_h),
+        int depth_w = depth_frame_1.get_width();
+        int depth_h = depth_frame_1.get_height();
+        cv::Mat imDepth_1(cv::Size(depth_w, depth_h),
                         CV_16UC1,
-                        (void*)depth_frame.get_data(),
+                        (void*)depth_frame_1.get_data(),
                         cv::Mat::AUTO_STEP);
-
-        // int cx = depth_w / 2; // Assuming depth and color frames are aligned
-        // int cy = depth_h / 2;
-        // float center_depth = depth_frame.get_distance(cx, cy);
-        // float raw_depth = imDepth.at<uint16_t>(cy, cx);
-        // std::cout << "Center pixel depth: " << center_depth << " meters, raw depth: " << raw_depth << " mm" << std::endl;
-        // Loop over every pixel (u, v):
-        cv::Mat depth_meter = cv::Mat(depth_h, depth_w, CV_32FC1); // one float per pixel
+        cv::Mat imDepth_2(cv::Size(depth_w, depth_h),
+                        CV_16UC1,
+                        (void*)depth_frame_2.get_data(),
+                        cv::Mat::AUTO_STEP);
+    
+        cv::Mat depth_meter_1 = cv::Mat(depth_h, depth_w, CV_32FC1); // one float per pixel
+        cv::Mat depth_meter_2 = cv::Mat(depth_h, depth_w, CV_32FC1);
         for (int v = 0; v < depth_h; v++)
         {
             for (int u = 0; u < depth_w; u++)
             {
                 // get_distance(u,v) is valid on rs2::depth_frame
-                float z = depth_frame.get_distance(u, v);
-                depth_meter.at<float>(v, u) = z; 
+                float z = depth_frame_1.get_distance(u, v);
+                depth_meter_1.at<float>(v, u) = z;
+                z = depth_frame_2.get_distance(u, v);
+                depth_meter_2.at<float>(v, u) = z;
                 // z is in meters. If no depth, z == 0.
             }
         }
 
         // h) Compute timestamp for this frame (in seconds)
         //    RealSense's get_timestamp() returns milliseconds since start.
-        double tframe = depth_frame.get_timestamp() / 1000.0;
-
+        double tframe_1 = depth_frame_1.get_timestamp() / 1000.0;
+        double tframe_2 = depth_frame_2.get_timestamp() / 1000.0;
         // i) Pass the synchronized RGB-D frame to ORB_SLAM2
-        SLAM.TrackRGBD(imRGB, depth_meter, tframe);
-
+        SLAM_1.TrackRGBD(imRGB_1, depth_meter_1, tframe_1);
+        SLAM_2.TrackRGBD(imRGB_2, depth_meter_2, tframe_2);
+        
         // j) Handle exit key
         int key = cv::waitKey(1);
         if( (key & 0xFF) == 27 || (key & 0xFF) == 'q' )
@@ -137,12 +154,12 @@ int main(int argc, char** argv)
     }
 
     // 7) Shutdown SLAM and clean up
-    SLAM.Shutdown();
+    SLAM_1.Shutdown();
     cv::destroyAllWindows();
 
     // 8) (Optional) Save trajectories if desired
-    SLAM.SaveTrajectoryTUM("CameraTrajectory.txt");
-    SLAM.SaveKeyFrameTrajectoryTUM("KeyFrameTrajectory.txt");
+    SLAM_1.SaveTrajectoryTUM("CameraTrajectory.txt");
+    SLAM_1.SaveKeyFrameTrajectoryTUM("KeyFrameTrajectory.txt");
 
     return 0;
 }

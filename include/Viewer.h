@@ -68,7 +68,8 @@ private:
     // 1/fps in ms
     double mT;
     float mImageWidth, mImageHeight;
-
+    static long unsigned int mnViewerCounter;
+    long unsigned int mnId;
     float mViewpointX, mViewpointY, mViewpointZ, mViewpointF;
 
     bool CheckFinish();

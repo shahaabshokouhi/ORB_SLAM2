@@ -70,6 +70,55 @@ MapPoint::MapPoint(const cv::Mat &Pos, Map* pMap, Frame* pFrame, const int &idxF
     mnId=nNextId++;
 }
 
+MapPoint::MapPoint(MapPoint& MP)
+{
+    // These MapPoints are only 
+    // created for transfering to other agents.
+    // They only carry necessary information.
+    mnId = MP.mnId; // not necessary
+    mnFirstKFid = MP.mnFirstKFid; 
+    mnFirstFrame = MP.mnFirstFrame; 
+    nObs = MP.nObs;
+    mnTrackReferenceForFrame = MP.mnTrackReferenceForFrame;
+    mnLastFrameSeen = MP.mnLastFrameSeen;
+    mnBALocalForKF = MP.mnBALocalForKF;
+    mnFuseCandidateForKF = MP.mnFuseCandidateForKF;
+    mnLoopPointForKF = MP.mnLoopPointForKF;
+    mnCorrectedByKF = MP.mnCorrectedByKF;
+    mnCorrectedReference = MP.mnCorrectedReference;
+    mnBAGlobalForKF = MP.mnBAGlobalForKF;
+
+    mpRefKF = MP.mpRefKF;
+    mpReplaced = MP.mpReplaced;
+    mbBad = MP.mbBad;
+    
+    mbSentToOther = false;
+
+    // Deep-copy world position and normals
+    {
+        std::unique_lock<std::mutex> lockPos(mMutexPos);
+        MP.mWorldPos.copyTo(mWorldPos);
+        MP.mNormalVector.copyTo(mNormalVector);
+        mfMinDistance = MP.mfMinDistance;
+        mfMaxDistance = MP.mfMaxDistance;
+    }
+
+    // Deep-copy descriptor and observations
+    {
+        std::unique_lock<std::mutex> lockFeat(MP.mMutexFeatures);
+        mDescriptor = MP.mDescriptor.clone();
+        mObservations = MP.mObservations;
+    }
+
+    // Copy visibility stats
+    mnVisible = MP.mnVisible;
+    mnFound = MP.mnFound;
+
+    // Assign to target map,  pTargetMap should be an input
+    // mpMap = pTargetMap;
+
+}
+
 void MapPoint::SetWorldPos(const cv::Mat &Pos)
 {
     unique_lock<mutex> lock2(mGlobalMutex);
@@ -106,6 +155,9 @@ void MapPoint::AddObservation(KeyFrame* pKF, size_t idx)
         nObs+=2;
     else
         nObs++;
+    
+    if(nObs >= 6)
+        mpMap->AddHighObs(this);
 }
 
 void MapPoint::EraseObservation(KeyFrame* pKF)
@@ -131,6 +183,9 @@ void MapPoint::EraseObservation(KeyFrame* pKF)
                 bBad=true;
         }
     }
+
+    if (nObs < 6)
+        mpMap->RemoveHighObs(this);
 
     if(bBad)
         SetBadFlag();

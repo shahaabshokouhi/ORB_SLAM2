@@ -314,7 +314,9 @@ void Tracking::Track()
                 {
                     bOK = TrackWithMotionModel();
                     if(!bOK)
+                    {
                         bOK = TrackReferenceKeyFrame();
+                    }
                 }
             }
             else
@@ -326,7 +328,6 @@ void Tracking::Track()
         else
         {
             // Localization Mode: Local Mapping is deactivated
-
             if(mState==LOST)
             {
                 bOK = Relocalization();

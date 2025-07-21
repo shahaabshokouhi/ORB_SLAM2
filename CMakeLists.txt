@@ -95,6 +95,11 @@ add_executable(rgbd_live Examples/RGB-D/rgbd_live.cc)
 target_link_libraries(rgbd_live ORB_SLAM2)
 target_link_libraries(rgbd_live realsense2::realsense2)
 
+## RGB-D multi-cam
+add_executable(multi_cam_rgbd Examples/RGB-D/multi_cam_rgbd.cc)
+target_link_libraries(multi_cam_rgbd ORB_SLAM2)
+target_link_libraries(multi_cam_rgbd realsense2::realsense2)
+
 ## Stereo
 set_target_properties(ORB_SLAM2 PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/Examples/Stereo

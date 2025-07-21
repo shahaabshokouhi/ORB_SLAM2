@@ -45,9 +45,15 @@ void Map::AddMapPoint(MapPoint *pMP)
 
 void Map::EraseMapPoint(MapPoint *pMP)
 {
-    unique_lock<mutex> lock(mMutexMap);
-    mspMapPoints.erase(pMP);
+    {
+        unique_lock<mutex> lock(mMutexMap);
+        mspMapPoints.erase(pMP);
+    }
 
+    {
+        unique_lock<mutex> lock2(mMutexHighObs);
+        mspHighObs.erase(pMP);
+    }
     // TODO: This only erase the pointer.
     // Delete the MapPoint
 }
@@ -129,5 +135,31 @@ void Map::clear()
     mvpReferenceMapPoints.clear();
     mvpKeyFrameOrigins.clear();
 }
+
+// Functions for MA-SLAM ----------------
+void Map::AddHighObs(MapPoint* pMP) 
+{
+    unique_lock<mutex> lock(mMutexHighObs);
+    mspHighObs.insert(pMP);
+}
+
+void Map::RemoveHighObs(MapPoint* pMP)
+{
+    unique_lock<mutex> lock(mMutexHighObs);
+    mspHighObs.erase(pMP);
+}
+
+long unsigned int Map::GetSizeHighObs()
+{
+    unique_lock<mutex> lock(mMutexHighObs);
+    return mspHighObs.size();
+}
+
+vector<MapPoint*> Map::GetHighObsMapPoints()
+{
+    unique_lock<mutex> lock(mMutexHighObs);
+    return vector<MapPoint*>(mspHighObs.begin(), mspHighObs.end());
+}
+
 
 } //namespace ORB_SLAM
