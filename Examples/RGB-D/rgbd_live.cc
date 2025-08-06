@@ -28,6 +28,7 @@
 #include<opencv2/core/core.hpp>
 
 #include<System.h>
+#include<MapPoint.h>
 
 using namespace std;
 
@@ -129,7 +130,10 @@ int main(int argc, char** argv)
 
         // i) Pass the synchronized RGB-D frame to ORB_SLAM2
         SLAM.TrackRGBD(imRGB, depth_meter, tframe);
-
+        
+        std::vector<ORB_SLAM2::MapPoint*> vpHighObs = SLAM.GetHighQualityMapPoints();
+        std::cout << "High quality map points: " << vpHighObs.size() << std::endl;
+        
         // j) Handle exit key
         int key = cv::waitKey(1);
         if( (key & 0xFF) == 27 || (key & 0xFF) == 'q' )

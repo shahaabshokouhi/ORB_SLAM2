@@ -501,4 +501,9 @@ void System::ImportHighQualityMapPoints(
     }
 }
 
+std::vector<MapPoint*> System::GetHighQualityMapPoints()
+{
+    return mpMap->GetHighObsMapPoints();
+}
+
 } //namespace ORB_SLAM

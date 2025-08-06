@@ -5,7 +5,7 @@ project(ORB_SLAM2)
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
-message("Build type: ${CMAKE_BUILD_TYPE}")
+message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 
 # 2) Compiler flags
 set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS}   -Wall -O3 -march=native")
@@ -31,18 +31,31 @@ endif()
 list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake_modules")
 
 # 5) Find dependencies
-find_package(OpenCV REQUIRED)
-find_package(Eigen3 3.3 REQUIRED NO_MODULE)      # header-only imported target
-find_package(Pangolin REQUIRED)
-find_package(realsense2 REQUIRED)
+find_package(OpenCV    REQUIRED)
+find_package(Eigen3 3.3 REQUIRED NO_MODULE)      # header-only
+find_package(Pangolin  REQUIRED)
+
+# --- manually locate Intel librealsense2 SDK ---
+find_path( REALSENSE2_INCLUDE_DIR
+  NAMES rs.hpp
+  PATHS /usr/include/librealsense2 /usr/local/include/librealsense2
+)
+find_library( REALSENSE2_LIBRARY
+  NAMES realsense2
+  PATHS /usr/lib/aarch64-linux-gnu /usr/lib /usr/local/lib
+)
+if(NOT REALSENSE2_INCLUDE_DIR OR NOT REALSENSE2_LIBRARY)
+  message(FATAL_ERROR "Could not find the Intel librealsense2 SDK. "
+                      "Install librealsense2-dev and rerun CMake.")
+endif()
 
 # 6) Include directories
 include_directories(
   ${PROJECT_SOURCE_DIR}
   ${PROJECT_SOURCE_DIR}/include
-  ${Pangolin_INCLUDE_DIRS}
   ${OpenCV_INCLUDE_DIRS}
-  # Eigen3::Eigen automatically provides its include path, so no manual EIGEN3_INCLUDE_DIR needed
+  ${Pangolin_INCLUDE_DIRS}
+  ${REALSENSE2_INCLUDE_DIR}
 )
 
 # 7) Output directories
@@ -73,7 +86,7 @@ add_library(ORB_SLAM2 SHARED
 )
 
 target_link_libraries(ORB_SLAM2
-  Eigen3::Eigen                          # header-only
+  Eigen3::Eigen               # header-only
   ${OpenCV_LIBS}
   ${Pangolin_LIBRARIES}
   ${PROJECT_SOURCE_DIR}/Thirdparty/DBoW2/lib/libDBoW2.so
@@ -82,23 +95,22 @@ target_link_libraries(ORB_SLAM2
 
 # 9) Examples
 
-## RGB-D
+## RGB-D (TUM)
 set_target_properties(ORB_SLAM2 PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/Examples/RGB-D
 )
 add_executable(rgbd_tum        Examples/RGB-D/rgbd_tum.cc)
-target_link_libraries(rgbd_tum ORB_SLAM2)
-target_link_libraries(rgbd_tum realsense2::realsense2)
+target_link_libraries(rgbd_tum
+  ORB_SLAM2
+  ${REALSENSE2_LIBRARY}
+)
 
-## RGB-D with RealSense
-add_executable(rgbd_live Examples/RGB-D/rgbd_live.cc)
-target_link_libraries(rgbd_live ORB_SLAM2)
-target_link_libraries(rgbd_live realsense2::realsense2)
-
-## RGB-D multi-cam
-add_executable(multi_cam_rgbd Examples/RGB-D/multi_cam_rgbd.cc)
-target_link_libraries(multi_cam_rgbd ORB_SLAM2)
-target_link_libraries(multi_cam_rgbd realsense2::realsense2)
+## RGB-D Live (RealSense)
+add_executable(rgbd_live       Examples/RGB-D/rgbd_live.cc)
+target_link_libraries(rgbd_live
+  ORB_SLAM2
+  ${REALSENSE2_LIBRARY}
+)
 
 ## Stereo
 set_target_properties(ORB_SLAM2 PROPERTIES
@@ -119,3 +131,17 @@ add_executable(mono_euroc      Examples/Monocular/mono_euroc.cc)
 target_link_libraries(mono_tum   ORB_SLAM2)
 target_link_libraries(mono_kitti ORB_SLAM2)
 target_link_libraries(mono_euroc ORB_SLAM2)
+
+# 10) system-wide install
+install(
+  TARGETS ORB_SLAM2
+  EXPORT ORB_SLAM2Targets
+  LIBRARY DESTINATION lib
+  ARCHIVE DESTINATION lib
+  RUNTIME DESTINATION bin
+)
+install(
+  DIRECTORY ${PROJECT_SOURCE_DIR}/include/
+  DESTINATION include/ORB_SLAM2
+  FILES_MATCHING PATTERN "*.h"
+)

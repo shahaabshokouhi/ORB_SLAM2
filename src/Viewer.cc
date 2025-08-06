@@ -66,7 +66,9 @@ void Viewer::Run()
     glBlendFunc (GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     std::string panelName = "menu" + std::to_string(mnId);
     pangolin::CreatePanel(panelName).SetBounds(0.0,1.0,0.0,pangolin::Attach::Pix(175));
+    
     pangolin::Var<bool> menuFollowCamera(panelName + ".Follow Camera",true,true);
+    pangolin::Var<bool> menuTopView(panelName + ".Top View", false, true);
     pangolin::Var<bool> menuShowPoints(panelName + ".Show Points",true,true);
     pangolin::Var<bool> menuHighObsMPOnly(panelName + ".High-Quality MPs", false, true);
     pangolin::Var<bool> menuShowKeyFrames(panelName + ".Show KeyFrames",true,true);
@@ -97,6 +99,19 @@ void Viewer::Run()
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
         mpMapDrawer->GetCurrentOpenGLCameraMatrix(Twc);
+
+        if(menuTopView)
+        {
+            pangolin::OpenGlMatrix topViewMatrix = pangolin::ModelViewLookAt(
+                0.0, -15.0, 0.01,   // Camera position (X, Y, Z)
+                0.0, 0.0, 0.0,     // Look at origin
+                0.0, 1.0, 0.0     // Up vector points toward -Z for top-down
+            );
+            s_cam.SetModelViewMatrix(topViewMatrix);
+            bFollow = false;
+            menuFollowCamera = false;
+        }
+
 
         if(menuFollowCamera && bFollow)
         {
@@ -143,6 +158,7 @@ void Viewer::Run()
             
         }
 
+        
         pangolin::FinishFrame();
 
         cv::Mat im = mpFrameDrawer->DrawFrame();
