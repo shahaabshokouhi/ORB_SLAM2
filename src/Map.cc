@@ -51,8 +51,8 @@ void Map::EraseMapPoint(MapPoint *pMP)
     }
 
     {
-        unique_lock<mutex> lock2(mMutexHighObs);
-        mspHighObs.erase(pMP);
+        unique_lock<mutex> lock2(mHighQualityMapPointsMutex);
+        mspHigQualityMapPoints.erase(pMP);
     }
     // TODO: This only erase the pointer.
     // Delete the MapPoint
@@ -137,28 +137,28 @@ void Map::clear()
 }
 
 // Functions for MA-SLAM ----------------
-void Map::AddHighObs(MapPoint* pMP) 
+void Map::AddHighQualityMapPoints(MapPoint* pMP) 
 {
-    unique_lock<mutex> lock(mMutexHighObs);
-    mspHighObs.insert(pMP);
+    unique_lock<mutex> lock(mHighQualityMapPointsMutex);
+    mspHigQualityMapPoints.insert(pMP);
 }
 
-void Map::RemoveHighObs(MapPoint* pMP)
+void Map::RemoveHighQaulityMapPoints(MapPoint* pMP)
 {
-    unique_lock<mutex> lock(mMutexHighObs);
-    mspHighObs.erase(pMP);
+    unique_lock<mutex> lock(mHighQualityMapPointsMutex);
+    mspHigQualityMapPoints.erase(pMP);
 }
 
-long unsigned int Map::GetSizeHighObs()
+long unsigned int Map::GetSizeHighQualityMapPoints()
 {
-    unique_lock<mutex> lock(mMutexHighObs);
-    return mspHighObs.size();
+    unique_lock<mutex> lock(mHighQualityMapPointsMutex);
+    return mspHigQualityMapPoints.size();
 }
 
-vector<MapPoint*> Map::GetHighObsMapPoints()
+vector<MapPoint*> Map::GetHighQualityMapPoints()
 {
-    unique_lock<mutex> lock(mMutexHighObs);
-    return vector<MapPoint*>(mspHighObs.begin(), mspHighObs.end());
+    unique_lock<mutex> lock(mHighQualityMapPointsMutex);
+    return vector<MapPoint*>(mspHigQualityMapPoints.begin(), mspHigQualityMapPoints.end());
 }
 
 

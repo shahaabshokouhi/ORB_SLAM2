@@ -60,10 +60,10 @@ public:
     void clear();
 
     // Functions for MA-SLAM
-    void AddHighObs(MapPoint* pMP);
-    void RemoveHighObs(MapPoint* pMP);
-    std::vector<MapPoint*> GetHighObsMapPoints();
-    long unsigned int GetSizeHighObs();
+    void AddHighQualityMapPoints(MapPoint* pMP);
+    void RemoveHighQaulityMapPoints(MapPoint* pMP);
+    std::vector<MapPoint*> GetHighQualityMapPoints();
+    long unsigned int GetSizeHighQualityMapPoints();
 
     vector<KeyFrame*> mvpKeyFrameOrigins;
 
@@ -87,8 +87,8 @@ protected:
 
 private:
     // variables for MA-SLAM
-    std::set<MapPoint*> mspHighObs;
-    std::mutex mMutexHighObs;
+    std::set<MapPoint*> mspHigQualityMapPoints;
+    std::mutex mHighQualityMapPointsMutex;
 };
 
 } //namespace ORB_SLAM

@@ -112,25 +112,22 @@ public:
     // See format details at: http://www.cvlibs.net/datasets/kitti/eval_odometry.php
     void SaveTrajectoryKITTI(const string &filename);
 
-    // This part is under contruction to multicam SLAM
-    // import into a staging area (no merge)
-    void ImportHighQualityMapPoints(
-        const std::vector<MapPoint*> &vMPs);
-    
-    // once user confirms, merge the staged points into the live map
-    // void MergeImportedMapPoints();
-
-    // TODO: Save/Load functions
-    // SaveMap(const string &filename);
-    // LoadMap(const string &filename);
-
     // Information from most recent processed frame
     // You can call this right after TrackMonocular (or stereo or RGBD)
     int GetTrackingState();
     std::vector<MapPoint*> GetTrackedMapPoints();
     std::vector<cv::KeyPoint> GetTrackedKeyPointsUn();
-    std::vector<MapPoint*> GetHighQualityMapPoints(); 
     Map* mpMap;
+
+    // This part is under contruction to multicam SLAM
+    // import into a staging area (no merge)
+    void ImportHighQualityMapPoints(
+        const std::vector<MapPoint*> &vMPs);
+    std::vector<MapPoint*> GetHighQualityMapPoints(); 
+
+    // once user confirms, merge the staged points into the live map
+    // void MergeImportedMapPoints();
+
 
 
 private:

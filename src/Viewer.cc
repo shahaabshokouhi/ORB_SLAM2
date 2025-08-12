@@ -148,7 +148,7 @@ void Viewer::Run()
         {
             if (menuHighObsMPOnly)
             {
-                auto vHigh = mpSystem->mpMap->GetHighObsMapPoints();
+                auto vHigh = mpSystem->mpMap->GetHighQualityMapPoints();
                 mpMapDrawer->DrawMapPoints(vHigh);
             }
             else

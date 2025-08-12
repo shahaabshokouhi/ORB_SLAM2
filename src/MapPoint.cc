@@ -157,7 +157,7 @@ void MapPoint::AddObservation(KeyFrame* pKF, size_t idx)
         nObs++;
     
     if(nObs >= 6)
-        mpMap->AddHighObs(this);
+        mpMap->AddHighQualityMapPoints(this);
 }
 
 void MapPoint::EraseObservation(KeyFrame* pKF)
@@ -185,7 +185,7 @@ void MapPoint::EraseObservation(KeyFrame* pKF)
     }
 
     if (nObs < 6)
-        mpMap->RemoveHighObs(this);
+        mpMap->RemoveHighQaulityMapPoints(this);
 
     if(bBad)
         SetBadFlag();
