@@ -506,4 +506,8 @@ std::vector<MapPoint*> System::GetHighQualityMapPoints()
     return mpMap->GetHighQualityMapPoints();
 }
 
+std::vector<MapPoint*> System::PopNewHighQualityMapPoints()
+{
+    return mpMap->PopNewHighQualityMapPoints();
+}
 } //namespace ORB_SLAM

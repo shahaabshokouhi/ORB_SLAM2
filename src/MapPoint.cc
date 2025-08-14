@@ -471,6 +471,27 @@ int MapPoint::PredictScale(const float &currentDist, Frame* pF)
     return nScale;
 }
 
+void MapPoint::SentToOther(bool b)
+{
+    unique_lock<mutex> lock(mMutexFeatures);
+    mbSentToOther = b;
+}
 
+void MapPoint::ReceivedFromOther(bool b)
+{
+    unique_lock<mutex> lock(mMutexFeatures);
+    mbReceivedFromOther = b;
+}
 
-} //namespace ORB_SLAM
+bool MapPoint::IsSentToOther()
+{
+    unique_lock<mutex> lock(mMutexFeatures);
+    return mbSentToOther;
+}
+
+bool MapPoint::IsReceivedFromOther()
+{
+    unique_lock<mutex> lock(mMutexFeatures);
+    return mbReceivedFromOther;
+}
+}//namespace ORB_SLAM

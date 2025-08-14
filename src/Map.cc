@@ -51,8 +51,8 @@ void Map::EraseMapPoint(MapPoint *pMP)
     }
 
     {
-        unique_lock<mutex> lock2(mHighQualityMapPointsMutex);
-        mspHigQualityMapPoints.erase(pMP);
+        unique_lock<mutex> lock2(mMutexMap);
+        mspHighQualityMapPoints.erase(pMP);
     }
     // TODO: This only erase the pointer.
     // Delete the MapPoint
@@ -139,27 +139,50 @@ void Map::clear()
 // Functions for MA-SLAM ----------------
 void Map::AddHighQualityMapPoints(MapPoint* pMP) 
 {
-    unique_lock<mutex> lock(mHighQualityMapPointsMutex);
-    mspHigQualityMapPoints.insert(pMP);
+    unique_lock<mutex> lock(mMutexMap);
+    if (mspHighQualityMapPoints.insert(pMP).second) {
+        mQueueNewHighQualityMapPoints.push_back(pMP);
+    }
 }
 
 void Map::RemoveHighQaulityMapPoints(MapPoint* pMP)
 {
-    unique_lock<mutex> lock(mHighQualityMapPointsMutex);
-    mspHigQualityMapPoints.erase(pMP);
+    unique_lock<mutex> lock(mMutexMap);
+    mspHighQualityMapPoints.erase(pMP);
+
+    // Also remove from the new queue if it is there
+    auto it = std::find(mQueueNewHighQualityMapPoints.begin(), mQueueNewHighQualityMapPoints.end(), pMP);
+    if (it != mQueueNewHighQualityMapPoints.end()) {
+        mQueueNewHighQualityMapPoints.erase(it);
+    }
 }
 
 long unsigned int Map::GetSizeHighQualityMapPoints()
 {
-    unique_lock<mutex> lock(mHighQualityMapPointsMutex);
-    return mspHigQualityMapPoints.size();
+    unique_lock<mutex> lock(mMutexMap);
+    return mspHighQualityMapPoints.size();
 }
 
 vector<MapPoint*> Map::GetHighQualityMapPoints()
 {
-    unique_lock<mutex> lock(mHighQualityMapPointsMutex);
-    return vector<MapPoint*>(mspHigQualityMapPoints.begin(), mspHigQualityMapPoints.end());
+    unique_lock<mutex> lock(mMutexMap);
+    return vector<MapPoint*>(mspHighQualityMapPoints.begin(), mspHighQualityMapPoints.end());
 }
 
+vector<MapPoint*> Map::PopNewHighQualityMapPoints()
+{
+    unique_lock<mutex> lock(mMutexMap);
+    std::vector<MapPoint*> out;
+
+    out.reserve(mQueueNewHighQualityMapPoints.size());
+    int sentCount = 0;
+    while(!mQueueNewHighQualityMapPoints.empty() && sentCount < 50)
+    {
+        out.push_back(mQueueNewHighQualityMapPoints.front());
+        mQueueNewHighQualityMapPoints.pop_front();
+        sentCount++;
+    }
+    return out;
+}
 
 } //namespace ORB_SLAM

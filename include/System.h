@@ -124,7 +124,7 @@ public:
     void ImportHighQualityMapPoints(
         const std::vector<MapPoint*> &vMPs);
     std::vector<MapPoint*> GetHighQualityMapPoints(); 
-
+    std::vector<MapPoint*> PopNewHighQualityMapPoints();
     // once user confirms, merge the staged points into the live map
     // void MergeImportedMapPoints();
 

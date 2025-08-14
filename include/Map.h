@@ -24,7 +24,7 @@
 #include "MapPoint.h"
 #include "KeyFrame.h"
 #include <set>
-
+#include <deque>
 #include <mutex>
 
 
@@ -64,6 +64,8 @@ public:
     void RemoveHighQaulityMapPoints(MapPoint* pMP);
     std::vector<MapPoint*> GetHighQualityMapPoints();
     long unsigned int GetSizeHighQualityMapPoints();
+    std::vector<MapPoint*> PopNewHighQualityMapPoints();
+
 
     vector<KeyFrame*> mvpKeyFrameOrigins;
 
@@ -87,8 +89,8 @@ protected:
 
 private:
     // variables for MA-SLAM
-    std::set<MapPoint*> mspHigQualityMapPoints;
-    std::mutex mHighQualityMapPointsMutex;
+    std::set<MapPoint*> mspHighQualityMapPoints;
+    std::deque<MapPoint*> mQueueNewHighQualityMapPoints;
 };
 
 } //namespace ORB_SLAM

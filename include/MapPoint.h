@@ -88,6 +88,12 @@ public:
     int PredictScale(const float &currentDist, KeyFrame*pKF);
     int PredictScale(const float &currentDist, Frame* pF);
 
+    // multi-agent functions
+    void SentToOther(bool b);
+    void ReceivedFromOther(bool b);
+    bool IsSentToOther();
+    bool IsReceivedFromOther();
+
 public:
     long unsigned int mnId;
     static long unsigned int nNextId;
@@ -118,7 +124,8 @@ public:
 
     static std::mutex mGlobalMutex;
 
-    bool mbSentToOther;
+    bool mbSentToOther = false;
+    bool mbReceivedFromOther = false; 
 
 protected:    
 
