@@ -156,8 +156,6 @@ void MapPoint::AddObservation(KeyFrame* pKF, size_t idx)
     else
         nObs++;
     
-    if(nObs >= 6)
-        mpMap->AddHighQualityMapPoints(this);
 }
 
 void MapPoint::EraseObservation(KeyFrame* pKF)
@@ -183,9 +181,6 @@ void MapPoint::EraseObservation(KeyFrame* pKF)
                 bBad=true;
         }
     }
-
-    if (nObs < 6)
-        mpMap->RemoveHighQaulityMapPoints(this);
 
     if(bBad)
         SetBadFlag();
@@ -494,4 +489,17 @@ bool MapPoint::IsReceivedFromOther()
     unique_lock<mutex> lock(mMutexFeatures);
     return mbReceivedFromOther;
 }
+
+void MapPoint::SetHighQuality(bool b)
+{
+    unique_lock<mutex> lock(mMutexFeatures);
+    mbHighQaulity = b;
+}
+
+bool MapPoint::IsHighQuality()
+{
+    unique_lock<mutex> lock(mMutexFeatures);
+    return mbHighQaulity;
+}
+
 }//namespace ORB_SLAM

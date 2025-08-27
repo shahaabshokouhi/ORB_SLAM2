@@ -35,6 +35,7 @@
 #include "KeyFrameDatabase.h"
 #include "ORBVocabulary.h"
 #include "Viewer.h"
+#include "HQmanager.h"
 
 namespace ORB_SLAM2
 {
@@ -45,6 +46,7 @@ class Map;
 class Tracking;
 class LocalMapping;
 class LoopClosing;
+class HighQualityManager;
 
 class System
 {
@@ -187,6 +189,10 @@ private:
     std::vector<MapPoint*> mvpImportedMapPoints;
     std::mutex mMutexImport;
     std::mutex mMutexMap;
+
+    // stuff related to multi-agent SLAM
+    HighQualityManager* mpHQmanager;
+    std::thread* mptHQmanager;
 };
 
 }// namespace ORB_SLAM

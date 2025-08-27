@@ -83,6 +83,7 @@ add_library(ORB_SLAM2 SHARED
   src/Sim3Solver.cc
   src/Initializer.cc
   src/Viewer.cc
+  src/HQmanager.cc
 )
 
 target_link_libraries(ORB_SLAM2

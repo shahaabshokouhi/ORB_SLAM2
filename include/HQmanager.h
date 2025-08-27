@@ -1,0 +1,44 @@
+#ifndef HQMANAGER_H
+#define HQMANAGER_H
+
+#include "MapPoint.h"
+#include "KeyFrame.h"
+#include "Map.h"
+
+#include <mutex>
+#include <vector>
+#include <string>
+#include <atomic>
+
+namespace ORB_SLAM2
+{
+
+class Map;
+class MapPoint;
+class KeyFrame;
+
+class HighQualityManager
+{
+public:
+    HighQualityManager(Map* pMap, const std::string& criteria, double period_sec);
+    
+    void Run();
+
+    void Notify();
+    void SetCriteria(const std::string criteria);
+
+private:
+    void ApplyToMapPoint(MapPoint* pMP, bool isHQ);
+
+private:
+    Map* mpMap = static_cast<Map*>(nullptr);
+    std::string mCriteria = "observation"; // or "ba"
+    double mPeriodSec = 1.0;
+
+    std::mutex mMutex;
+    std::atomic<bool> mDoScan{false};
+
+};
+
+}
+#endif // HQMANAGER_H

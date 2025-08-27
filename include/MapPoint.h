@@ -93,6 +93,8 @@ public:
     void ReceivedFromOther(bool b);
     bool IsSentToOther();
     bool IsReceivedFromOther();
+    void SetHighQuality(bool b);
+    bool IsHighQuality();
 
 public:
     long unsigned int mnId;
@@ -124,6 +126,8 @@ public:
 
     static std::mutex mGlobalMutex;
 
+    // stuff for multi-agent SLAM
+    bool mbHighQaulity = false;
     bool mbSentToOther = false;
     bool mbReceivedFromOther = false; 
 

@@ -116,6 +116,12 @@ public:
         return pKF1->mnId<pKF2->mnId;
     }
 
+    // Stuff for multi-agent SLAM
+    void AddHighQualityMapPoint(MapPoint* pMP, const size_t idx);
+    void EraseHighQualityMapPoint(const size_t idx);
+    MapPoint* GetHighQualityMapPoint(const size_t idx);
+    std::vector<MapPoint*> GetHighQualityMapPoints();
+
 
     // The following variables are accesed from only 1 thread or never change (no mutex needed).
 public:
@@ -187,6 +193,11 @@ public:
     const int mnMaxX;
     const int mnMaxY;
     const cv::Mat mK;
+
+    // Stuff for multi-agent SLAM
+    std::vector<MapPoint*> mvpHighQualityMapPoints;
+    std::vector<bool> mvbHighQualityMask;
+
 
 
     // The following variables need to be accessed trough a mutex to be thread safe.

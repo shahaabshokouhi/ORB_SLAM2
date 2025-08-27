@@ -45,6 +45,10 @@ KeyFrame::KeyFrame(Frame &F, Map *pMap, KeyFrameDatabase *pKFDB):
 {
     mnId=nNextId++;
 
+    // Stuff for multi-agent SLAM
+    mvpHighQualityMapPoints.assign(N, static_cast<MapPoint*>(nullptr));
+    mvbHighQualityMask.assign(N, false);
+
     mGrid.resize(mnGridCols);
     for(int i=0; i<mnGridCols;i++)
     {
@@ -660,6 +664,42 @@ float KeyFrame::ComputeSceneMedianDepth(const int q)
     sort(vDepths.begin(),vDepths.end());
 
     return vDepths[(vDepths.size()-1)/q];
+}
+
+// Stuff for multi-agent SLAM
+void KeyFrame::AddHighQualityMapPoint(MapPoint* pMP, const size_t idx)
+{
+    if (!pMP) return;
+    unique_lock<mutex> lock(mMutexFeatures);
+    if (idx >= mvpHighQualityMapPoints.size()) return;
+    mvpHighQualityMapPoints[idx] = pMP;
+    mvbHighQualityMask[idx] = true;
+}
+
+void KeyFrame::EraseHighQualityMapPoint(const size_t idx)
+{
+    unique_lock<mutex> lock(mMutexFeatures);
+    if(idx >= mvpHighQualityMapPoints.size()) return;
+    mvpHighQualityMapPoints[idx] = static_cast<MapPoint*>(nullptr);
+    mvbHighQualityMask[idx] = false;
+}
+
+MapPoint* KeyFrame::GetHighQualityMapPoint(const size_t idx) 
+{
+    unique_lock<mutex> lock(mMutexFeatures);
+    if (idx >= mvpHighQualityMapPoints.size()) return nullptr;
+    return mvpHighQualityMapPoints[idx];
+}
+
+std::vector<MapPoint*> KeyFrame::GetHighQualityMapPoints() 
+{
+    unique_lock<mutex> lock(mMutexFeatures);
+    std::vector<MapPoint*> vpMPs;
+    vpMPs.reserve(mvpHighQualityMapPoints.size());
+    for (size_t i =0; i < mvpHighQualityMapPoints.size(); i++){
+        if(mvbHighQualityMask[i] && mvpHighQualityMapPoints[i]) vpMPs.push_back(mvpHighQualityMapPoints[i]);
+    }
+    return vpMPs;
 }
 
 } //namespace ORB_SLAM
