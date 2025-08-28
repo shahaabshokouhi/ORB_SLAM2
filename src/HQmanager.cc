@@ -55,6 +55,16 @@ void HighQualityManager::Run()
                 mpMap->RemoveHighQaulityMapPoints(pMP);
             }
         }
+
+        vector<KeyFrame*> vKFs = mpMap->GetAllKeyFrames();
+        for (KeyFrame* pKF : vKFs) {
+            if (!pKF) continue;
+
+            if (pKF->NeedsHQBoWUpdate()) {
+                pKF->ComputeHQBoW();
+                pKF->ClearHQBoWUpdateFlag();
+            }
+        }
     }
 }
 

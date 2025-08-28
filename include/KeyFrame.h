@@ -121,6 +121,11 @@ public:
     void EraseHighQualityMapPoint(const size_t idx);
     MapPoint* GetHighQualityMapPoint(const size_t idx);
     std::vector<MapPoint*> GetHighQualityMapPoints();
+    void ComputeHQBoW();
+    void MarkHQBoWDirty();
+    bool ConsumeHQBoWDirty();
+    bool NeedsHQBoWUpdate();
+    void ClearHQBoWUpdateFlag();
 
 
     // The following variables are accesed from only 1 thread or never change (no mutex needed).
@@ -197,6 +202,10 @@ public:
     // Stuff for multi-agent SLAM
     std::vector<MapPoint*> mvpHighQualityMapPoints;
     std::vector<bool> mvbHighQualityMask;
+    bool mbHQBoWDirty = true;
+    DBoW2::BowVector mHQBowVec;
+    DBoW2::FeatureVector mHQFeatVec;
+    bool needsHQBoWUpdate = true;
 
 
 

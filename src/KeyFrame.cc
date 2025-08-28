@@ -23,6 +23,11 @@
 #include "ORBmatcher.h"
 #include<mutex>
 
+#include <unordered_set>
+#include <opencv2/core/core.hpp>
+#include <vector>
+
+
 namespace ORB_SLAM2
 {
 
@@ -670,18 +675,40 @@ float KeyFrame::ComputeSceneMedianDepth(const int q)
 void KeyFrame::AddHighQualityMapPoint(MapPoint* pMP, const size_t idx)
 {
     if (!pMP) return;
-    unique_lock<mutex> lock(mMutexFeatures);
+    std::unique_lock<std::mutex> lock(mMutexFeatures);
     if (idx >= mvpHighQualityMapPoints.size()) return;
+
+    MapPoint* prevPtr = mvpHighQualityMapPoints[idx];
+    bool      prevMsk = mvbHighQualityMask[idx];
+
+    // only change if different
+    if (prevPtr == pMP && prevMsk == true) {
+        return; // no-op; don't mark dirty/flag
+    }
+
     mvpHighQualityMapPoints[idx] = pMP;
-    mvbHighQualityMask[idx] = true;
+    mvbHighQualityMask[idx]      = true;
+
+    needsHQBoWUpdate  = true;   // new flag: real change happened
 }
 
 void KeyFrame::EraseHighQualityMapPoint(const size_t idx)
 {
-    unique_lock<mutex> lock(mMutexFeatures);
-    if(idx >= mvpHighQualityMapPoints.size()) return;
-    mvpHighQualityMapPoints[idx] = static_cast<MapPoint*>(nullptr);
-    mvbHighQualityMask[idx] = false;
+    std::unique_lock<std::mutex> lock(mMutexFeatures);
+    if (idx >= mvpHighQualityMapPoints.size()) return;
+
+    MapPoint* prevPtr = mvpHighQualityMapPoints[idx];
+    bool      prevMsk = mvbHighQualityMask[idx];
+
+    // only change if something was set before
+    if (prevPtr == nullptr && prevMsk == false) {
+        return; // no-op
+    }
+
+    mvpHighQualityMapPoints[idx] = nullptr;
+    mvbHighQualityMask[idx]      = false;
+
+    needsHQBoWUpdate  = true;
 }
 
 MapPoint* KeyFrame::GetHighQualityMapPoint(const size_t idx) 
@@ -700,6 +727,79 @@ std::vector<MapPoint*> KeyFrame::GetHighQualityMapPoints()
         if(mvbHighQualityMask[i] && mvpHighQualityMapPoints[i]) vpMPs.push_back(mvpHighQualityMapPoints[i]);
     }
     return vpMPs;
+}
+
+void KeyFrame::ComputeHQBoW()
+{
+    // Same voacab as normal BoW
+    if (!mpORBvocabulary) {
+        mHQBowVec.clear();
+        mHQFeatVec.clear();
+        return;
+    }
+
+    std::vector<MapPoint*> hqMPs;
+    {
+        std::unique_lock<std::mutex> lock(mMutexFeatures);
+        hqMPs = mvpHighQualityMapPoints;
+    }
+
+    if (hqMPs.empty()) {
+        mHQBowVec.clear();
+        mHQFeatVec.clear();
+        return;
+    }
+
+    std::unordered_set<MapPoint*> seen;
+    std::vector<cv::Mat> vDesc;
+    vDesc.reserve(hqMPs.size());
+
+    for (MapPoint* pMP : hqMPs) {
+        if (!pMP || pMP->isBad()) continue;
+        if (!seen.insert(pMP).second) continue; // Already in set
+
+        const cv::Mat d = pMP->GetDescriptor();
+        if (!d.empty()) vDesc.push_back(d);
+    }
+
+    if (vDesc.empty()) {
+        mHQBowVec.clear();
+        mHQFeatVec.clear();
+        return;
+    }
+
+    DBoW2::BowVector bowVec;
+    DBoW2::FeatureVector featVec;
+    mpORBvocabulary->transform(vDesc, bowVec, featVec, 4);
+    {
+        std::unique_lock<std::mutex> lock(mMutexFeatures);
+        mHQBowVec = bowVec;
+        mHQFeatVec = featVec;
+    }
+}
+
+void KeyFrame::MarkHQBoWDirty() {
+    std::unique_lock<std::mutex> lock(mMutexFeatures);
+    mbHQBoWDirty = true;
+}
+
+bool KeyFrame::ConsumeHQBoWDirty() {
+    std::unique_lock<std::mutex> lock(mMutexFeatures);
+    bool was = mbHQBoWDirty;
+    mbHQBoWDirty = false;
+    return was;
+}
+
+bool KeyFrame::NeedsHQBoWUpdate()
+{
+    std::unique_lock<std::mutex> lock(mMutexFeatures);
+    return needsHQBoWUpdate;
+}
+
+void KeyFrame::ClearHQBoWUpdateFlag()
+{
+    std::unique_lock<std::mutex> lock(mMutexFeatures);
+    needsHQBoWUpdate = false;
 }
 
 } //namespace ORB_SLAM
