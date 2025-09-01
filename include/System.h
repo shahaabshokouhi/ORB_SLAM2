@@ -129,7 +129,8 @@ public:
     std::vector<MapPoint*> PopNewHighQualityMapPoints();
     // once user confirms, merge the staged points into the live map
     // void MergeImportedMapPoints();
-
+    HighQualityManager* mpHQmanager;
+    std::thread* mptHQmanager;
 
 
 private:
@@ -191,8 +192,7 @@ private:
     std::mutex mMutexMap;
 
     // stuff related to multi-agent SLAM
-    HighQualityManager* mpHQmanager;
-    std::thread* mptHQmanager;
+
 };
 
 }// namespace ORB_SLAM

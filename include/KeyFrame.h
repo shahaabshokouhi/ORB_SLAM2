@@ -126,6 +126,7 @@ public:
     bool ConsumeHQBoWDirty();
     bool NeedsHQBoWUpdate();
     void ClearHQBoWUpdateFlag();
+    DBoW2::BowVector GetHQBoWVec();
 
 
     // The following variables are accesed from only 1 thread or never change (no mutex needed).
@@ -205,7 +206,7 @@ public:
     bool mbHQBoWDirty = true;
     DBoW2::BowVector mHQBowVec;
     DBoW2::FeatureVector mHQFeatVec;
-    bool needsHQBoWUpdate = true;
+    bool needsHQBoWUpdate = false;
 
 
 

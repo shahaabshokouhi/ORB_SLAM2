@@ -679,15 +679,14 @@ void KeyFrame::AddHighQualityMapPoint(MapPoint* pMP, const size_t idx)
     if (idx >= mvpHighQualityMapPoints.size()) return;
 
     MapPoint* prevPtr = mvpHighQualityMapPoints[idx];
-    bool      prevMsk = mvbHighQualityMask[idx];
 
     // only change if different
-    if (prevPtr == pMP && prevMsk == true) {
+    if (prevPtr == pMP) {
+        std::cout << "no-op: same HQ map point being set again" << std::endl;
         return; // no-op; don't mark dirty/flag
     }
 
     mvpHighQualityMapPoints[idx] = pMP;
-    mvbHighQualityMask[idx]      = true;
 
     needsHQBoWUpdate  = true;   // new flag: real change happened
 }
@@ -698,15 +697,13 @@ void KeyFrame::EraseHighQualityMapPoint(const size_t idx)
     if (idx >= mvpHighQualityMapPoints.size()) return;
 
     MapPoint* prevPtr = mvpHighQualityMapPoints[idx];
-    bool      prevMsk = mvbHighQualityMask[idx];
 
     // only change if something was set before
-    if (prevPtr == nullptr && prevMsk == false) {
+    if (prevPtr == nullptr) {
         return; // no-op
     }
 
     mvpHighQualityMapPoints[idx] = nullptr;
-    mvbHighQualityMask[idx]      = false;
 
     needsHQBoWUpdate  = true;
 }
@@ -724,7 +721,7 @@ std::vector<MapPoint*> KeyFrame::GetHighQualityMapPoints()
     std::vector<MapPoint*> vpMPs;
     vpMPs.reserve(mvpHighQualityMapPoints.size());
     for (size_t i =0; i < mvpHighQualityMapPoints.size(); i++){
-        if(mvbHighQualityMask[i] && mvpHighQualityMapPoints[i]) vpMPs.push_back(mvpHighQualityMapPoints[i]);
+        if(mvpHighQualityMapPoints[i]) vpMPs.push_back(mvpHighQualityMapPoints[i]);
     }
     return vpMPs;
 }
@@ -776,6 +773,7 @@ void KeyFrame::ComputeHQBoW()
         mHQBowVec = bowVec;
         mHQFeatVec = featVec;
     }
+    std::cout << "Updated HQ BoW for KF " << mnId << " with " << vDesc.size() << " descriptors." << std::endl;
 }
 
 void KeyFrame::MarkHQBoWDirty() {
@@ -800,6 +798,12 @@ void KeyFrame::ClearHQBoWUpdateFlag()
 {
     std::unique_lock<std::mutex> lock(mMutexFeatures);
     needsHQBoWUpdate = false;
+}
+
+DBoW2::BowVector KeyFrame::GetHQBoWVec()
+{
+    std::unique_lock<std::mutex> lock(mMutexFeatures);
+    return mHQBowVec;
 }
 
 } //namespace ORB_SLAM

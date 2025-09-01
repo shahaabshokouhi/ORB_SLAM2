@@ -123,7 +123,9 @@ int main(int argc, char **argv)
 
     // Save camera trajectory
     SLAM.SaveTrajectoryKITTI("CameraTrajectory.txt");
-
+    cout << "Saving BoW comparison to bow_vs_hqbow_matches.csv" << endl;
+    SLAM.mpHQmanager->ExportBoWTopMatchesCSV("bow_vs_hqbow_matches.csv", /*topK=*/10);
+    cout << "Done." << endl;
     return 0;
 }
 
