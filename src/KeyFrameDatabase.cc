@@ -73,7 +73,7 @@ void KeyFrameDatabase::clear()
 }
 
 
-vector<KeyFrame*> KeyFrameDatabase::DetectLoopCandidates(KeyFrame* pKF, float minScore)
+vector<KeyFrame*> KeyFrameDatabase::DetectLoopCandidates(KeyFrame* pKF, float minScore, bool useHQ)
 {
     set<KeyFrame*> spConnectedKeyFrames = pKF->GetConnectedKeyFrames();
     list<KeyFrame*> lKFsSharingWords;
@@ -129,12 +129,16 @@ vector<KeyFrame*> KeyFrameDatabase::DetectLoopCandidates(KeyFrame* pKF, float mi
         if(pKFi->mnLoopWords>minCommonWords)
         {
             nscores++;
+            if (useHQ && !pKFi->GetHQBoWVec().empty() && !pKF->GetHQBoWVec().empty()) {
+                float si = mpVoc->score(pKF->GetHQBoWVec() ,pKFi->GetHQBoWVec());
+                pKFi->mLoopScore = si;
+            } else {
+                float si = mpVoc->score(pKF->mBowVec,pKFi->mBowVec);
+                pKFi->mLoopScore = si;
+            }
 
-            float si = mpVoc->score(pKF->mBowVec,pKFi->mBowVec);
-
-            pKFi->mLoopScore = si;
-            if(si>=minScore)
-                lScoreAndMatch.push_back(make_pair(si,pKFi));
+            if(pKFi->mLoopScore >=minScore)
+                lScoreAndMatch.push_back(make_pair(pKFi->mLoopScore ,pKFi));
         }
     }
 

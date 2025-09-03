@@ -45,10 +45,10 @@ void HighQualityManager::Run()
         // ----------------------------
         // Thresholds (tune here)
         // ----------------------------
-        const int   kMinObs                = 4;      // baseline
-        const float kMinFoundRatio         = 0.30f;  // 0.25..0.5 typical
+        const int   kMinObs                = 6;      // baseline
+        const float kMinFoundRatio         = 0.50f;  // 0.25..0.5 typical
         const int   kMaxScaleLevelDiff     = 1;      // |oct - pred| <= 1
-        const float kMinViewCos            = 0.50f;  // cos(60 deg)
+        const float kMinViewCos            = 0.70f;  // cos(60 deg)
         const int   kMinGoodFracPercent    = 60;     // % observations meeting geom checks
         const int   kMinTemporalSpanFrames = 80;     // observation span requirement
         const int   kMaxDescHamMean        = 40;     // ORB Hamming mean
@@ -63,9 +63,14 @@ void HighQualityManager::Run()
 
             if (crit=="observation") {
                 isHQ = (pMP->Observations() >= kMinObs);
-            } else if (crit=="ba") {
-                // placeholder
+            } else if (crit=="foundratio") {
+                isHQ = (pMP->GetFoundRatio() >= kMinFoundRatio);
+            } else if (crit=="combo")
+            {
+                isHQ = (pMP->Observations() >= kMinObs) &&
+                       (pMP->GetFoundRatio() >= kMinFoundRatio);
             }
+            
 
             ApplyToMapPoint(pMP, isHQ);
             if (isHQ) {

@@ -61,7 +61,8 @@ public:
 
 public:
 
-    LoopClosing(Map* pMap, KeyFrameDatabase* pDB, ORBVocabulary* pVoc,const bool bFixScale);
+    LoopClosing(Map* pMap, KeyFrameDatabase* pDB, ORBVocabulary* pVoc,const bool bFixScale,
+                bool bUseHQBoW = false);
 
     void SetTracker(Tracking* pTracker);
 
@@ -89,6 +90,8 @@ public:
     void RequestFinish();
 
     bool isFinished();
+
+    bool mbUseHQBoW;
 
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
