@@ -1,169 +1,146 @@
-# compare_kitti_vs_orbslam2.py
-# Reads:  /mnt/data/00.txt                 (KITTI GT; 3x4 per line)
-#         /mnt/data/CameraTrajectory.txt   (KITTI-style; 3x4 per line)
-#         /mnt/data/KeyFrameTrajectory.txt (TUM style; t tx ty tz qx qy qz qw)
-# Outputs plots + metrics CSV.
-
+# This script loads KITTI ground-truth poses and an ORB-SLAM2 estimated trajectory,
+# overlays the trajectories (top-down X–Z), and plots per-frame and cumulative position error.
+#
+# Files used (already uploaded in this chat sandbox):
+#   - GT:  /mnt/data/05.txt
+#   - Est: /mnt/data/CameraTrajectory.txt
+#
+# The code is robust to differing lengths and will optionally align the estimated
+# trajectory to the ground truth with a rigid SE(3) (no scale) Umeyama alignment.
+#
+# It will also save the plots next to the inputs.
 import numpy as np
-import pandas as pd
-import math
-from pathlib import Path
 import matplotlib.pyplot as plt
+from pathlib import Path
 
-DATA_DIR = Path("")
-GT_PATH = DATA_DIR/"05.txt"
-CAM_PATH = DATA_DIR/"CameraTrajectory.txt"
-KF_PATH  = DATA_DIR/"KeyFrameTrajectory.txt"
-METRICS_OUT = DATA_DIR/"traj_metrics.csv"
+GT_PATH = Path("06.txt")
+EST_PATH = Path("CameraTrajectory.txt")
+SAVE_DIR = Path("")
 
-def load_kitti_poses_txt(path):
+def load_kitti_poses_txt(path: Path):
+    """
+    Reads a KITTI-style pose file (each line: 12 numbers -> 3x4 matrix row-major).
+    Returns:
+        T (N, 3, 4) array, positions as translation column (N, 3), rotations (N, 3, 3).
+    """
     mats = []
-    with open(path, 'r') as f:
+    with open(path, "r") as f:
         for line in f:
-            line = line.strip()
-            if not line: 
+            vals = line.strip().split()
+            if len(vals) < 12:
                 continue
-            parts = [p for p in line.replace('\t',' ').split(' ') if p!='']
-            if len(parts) < 12:
-                continue
-            vals = list(map(float, parts[:12]))
-            T = np.eye(4, dtype=float)
-            T[:3,:4] = np.array(vals).reshape(3,4)
-            mats.append(T)
-    return np.stack(mats, axis=0) if mats else np.zeros((0,4,4))
+            m = np.array([float(x) for x in vals[:12]], dtype=np.float64).reshape(3, 4)
+            mats.append(m)
+    if not mats:
+        raise ValueError(f"No valid lines found in {path}")
+    T = np.stack(mats, axis=0)
+    R = T[:, :, :3]
+    t = T[:, :, 3]
+    return T, t, R
 
-def quat_to_rot(qx, qy, qz, qw):
-    x, y, z, w = qx, qy, qz, qw
-    n = math.sqrt(x*x + y*y + z*z + w*w) or 1.0
-    x, y, z, w = x/n, y/n, z/n, w/n
-    return np.array([
-        [1-2*(y*y+z*z), 2*(x*y - z*w), 2*(x*z + y*w)],
-        [2*(x*y + z*w), 1-2*(x*x+z*z), 2*(y*z - x*w)],
-        [2*(x*z - y*w), 2*(y*z + x*w), 1-2*(x*x+y*y)]
-    ], dtype=float)
+def camera_centers_from_matrix(T_3x4, assume_Twc=True):
+    """
+    Returns camera centers in world coordinates.
+    If assume_Twc=True (KITTI style), then the last column is the camera center (t).
+    Otherwise, compute C = -R^T t.
+    """
+    R = T_3x4[:, :, :3]
+    t = T_3x4[:, :, 3]
+    if assume_Twc:
+        return t.copy()
+    # world-from-camera unknown: treat T as world-to-camera; get camera center in world
+    # C = -R^T t for each frame
+    CT = -np.einsum("nij,ni->nj", np.transpose(R, (0, 2, 1)), t)
+    return CT
 
-def load_tum_trajectory(path):
-    Ts, ts = [], []
-    with open(path, 'r') as f:
-        for line in f:
-            line=line.strip()
-            if not line or line.startswith("#"): continue
-            parts = line.split()
-            if len(parts) < 8: continue
-            t, tx, ty, tz, qx, qy, qz, qw = map(float, parts[:8])
-            T = np.eye(4); T[:3,:3]=quat_to_rot(qx,qy,qz,qw); T[:3,3]=[tx,ty,tz]
-            Ts.append(T); ts.append(t)
-    return (np.stack(Ts, axis=0), np.array(ts)) if Ts else (np.zeros((0,4,4)), [])
+def umeyama_rigid_alignment(A, B):
+    """
+    Computes rigid alignment (R, t) that maps A -> B (no scale).
+    A, B: (N,3). Returns R(3,3), t(3,).
+    """
+    if A.shape[0] != B.shape[0]:
+        n = min(A.shape[0], B.shape[0])
+        A = A[:n]
+        B = B[:n]
+    mu_A = A.mean(axis=0)
+    mu_B = B.mean(axis=0)
+    A0 = A - mu_A
+    B0 = B - mu_B
+    H = A0.T @ B0
+    U, S, Vt = np.linalg.svd(H)
+    R = Vt.T @ U.T
+    if np.linalg.det(R) < 0:
+        Vt[-1, :] *= -1
+        R = Vt.T @ U.T
+    t = mu_B - R @ mu_A
+    return R, t
 
-def positions(Ts):
-    return Ts[:, :3, 3] if Ts.size else np.zeros((0,3))
+def compute_errors(gt_xyz, est_xyz, align=True):
+    """
+    Optionally align 'est' to 'gt' with a rigid transform; then compute per-frame error and cumulative error.
+    Returns: est_aligned (N,3), err (N,), err_cum (N,), rmse (float)
+    """
+    n = min(len(gt_xyz), len(est_xyz))
+    gt = gt_xyz[:n]
+    est = est_xyz[:n]
+    if align:
+        R, t = umeyama_rigid_alignment(est, gt)
+        est_aligned = (est @ R.T) + t
+    else:
+        est_aligned = est
+    diffs = est_aligned - gt
+    err = np.linalg.norm(diffs, axis=1)
+    err_cum = np.cumsum(err)
+    rmse = np.sqrt(np.mean(err**2))
+    return est_aligned, err, err_cum, rmse
 
-def umeyama_sim3(X, Y):
-    # Y ≈ s R X + t
-    n = X.shape[0]
-    muX, muY = X.mean(0), Y.mean(0)
-    Xc, Yc = X-muX, Y-muY
-    Sigma = (Yc.T @ Xc)/n
-    U, D, Vt = np.linalg.svd(Sigma)
-    S = np.eye(3); 
-    if np.linalg.det(U @ Vt) < 0: S[2,2] = -1
-    R = U @ S @ Vt
-    varX = (Xc**2).sum()/n
-    s = np.trace(np.diag(D) @ S)/varX
-    t = muY - s*(R @ muX)
-    return s, R, t
+# Load files
+T_gt, t_gt, R_gt = load_kitti_poses_txt(GT_PATH)
+T_est, t_est, R_est = load_kitti_poses_txt(EST_PATH)
 
-def apply_sim3(Ts, s, R, t):
-    if Ts.size == 0: return Ts
-    out = Ts.copy()
-    for i in range(Ts.shape[0]):
-        out[i,:3,:3] = R @ Ts[i,:3,:3]
-        out[i,:3, 3] = s * (R @ Ts[i,:3,3]) + t
-    return out
+# For KITTI 'poses' the last column is already camera center in world coords.
+pos_gt = t_gt  # (N,3)
+pos_est = t_est
 
-def align_and_metrics(gt_Ts, est_Ts):
-    if gt_Ts.size == 0 or est_Ts.size == 0:
-        return {"rmse": np.nan, "mean": np.nan, "median": np.nan, "n": 0}, est_Ts
-    n = min(len(gt_Ts), len(est_Ts))
-    gt, es = positions(gt_Ts[:n]), positions(est_Ts[:n])
-    s, R, t = umeyama_sim3(es, gt)
-    est_aligned = apply_sim3(est_Ts.copy(), s, R, t)
-    esA = positions(est_aligned[:n])
-    e = np.linalg.norm(esA - gt, axis=1)
-    return {"rmse": float(np.sqrt((e**2).mean())),
-            "mean": float(e.mean()),
-            "median": float(np.median(e)),
-            "n": int(n)}, est_aligned
+# Compute errors with alignment
+est_aligned, err, err_cum, rmse = compute_errors(pos_gt, pos_est, align=True)
 
-# ---- Load ----
-gt_Ts  = load_kitti_poses_txt(GT_PATH)
-cam_Ts = load_kitti_poses_txt(CAM_PATH)
-kf_Ts, _ = load_tum_trajectory(KF_PATH)
+# --- Plot 1: Top-down trajectory (X-Z) overlay ---
+plt.figure(figsize=(8, 6))
+plt.plot(pos_gt[:, 0], pos_gt[:, 2], label="GT (X-Z)")
+plt.plot(est_aligned[:, 0], est_aligned[:, 2], label="ORB-SLAM2 (aligned) (X-Z)")
+plt.axis("equal")
+plt.title("KITTI Trajectory (Top-Down)")
+plt.xlabel("X (m)")
+plt.ylabel("Z (m)")
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.savefig(SAVE_DIR / "trajectory_topdown.png", dpi=150)
 
-# For keyframes, compare against uniformly subsampled GT
-if len(kf_Ts)>0 and len(gt_Ts)>0:
-    idx = np.linspace(0, len(gt_Ts)-1, num=min(len(kf_Ts), len(gt_Ts)), dtype=int)
-    gt_for_kf, kf_eval = gt_Ts[idx], kf_Ts[:len(idx)]
-else:
-    gt_for_kf = np.zeros((0,4,4)); kf_eval = np.zeros((0,4,4))
+# --- Plot 2: Per-frame position error ---
+plt.figure(figsize=(8, 4))
+plt.plot(err, label="Per-frame position error (m)")
+plt.title(f"Per-frame Error (RMSE = {rmse:.3f} m)")
+plt.xlabel("Frame index")
+plt.ylabel("Euclidean position error (m)")
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.savefig(SAVE_DIR / "error_per_frame.png", dpi=150)
 
-# ---- Align & metrics ----
-m_cam, cam_aligned = align_and_metrics(gt_Ts, cam_Ts)
-m_kf,  kf_aligned  = align_and_metrics(gt_for_kf, kf_eval)
-pd.DataFrame([{"traj":"CameraTrajectory", **m_cam},
-              {"traj":"KeyFrameTrajectory", **m_kf}]).to_csv(METRICS_OUT, index=False)
+# --- Plot 3: Cumulative position error ---
+plt.figure(figsize=(8, 4))
+plt.plot(err_cum, label="Cumulative position error (m)")
+plt.title("Cumulative Position Error")
+plt.xlabel("Frame index")
+plt.ylabel("Accumulated error (m)")
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.savefig(SAVE_DIR / "error_cumulative.png", dpi=150)
 
-# ---- Plots ----
-# 1) Top-down GT vs CameraTrajectory
-plt.figure()
-p_gt  = positions(gt_Ts)
-p_cam = positions(cam_aligned)
-plt.plot(p_gt[:,0], p_gt[:,2], label="GT (top-down)")
-plt.plot(p_cam[:,0], p_cam[:,2], label="Cam aligned")
-plt.axis('equal'); plt.legend(); plt.title("Top-down: GT vs CameraTrajectory (aligned)")
-
-# 2) Top-down GT (subsampled) vs KeyFrameTrajectory
-if len(kf_aligned)>0:
-    plt.figure()
-    p_gt_k = positions(gt_for_kf)
-    p_kf   = positions(kf_aligned)
-    plt.plot(p_gt_k[:,0], p_gt_k[:,2], label="GT (subsampled)")
-    plt.plot(p_kf[:,0],   p_kf[:,2],   label="KeyFrames aligned")
-    plt.axis('equal'); plt.legend(); plt.title("Top-down: GT vs KeyFrameTrajectory (aligned)")
-
-# 3) Per-frame ATE: Cam
-if gt_Ts.size and cam_aligned.size:
-    n = min(len(gt_Ts), len(cam_aligned))
-    e = np.linalg.norm(positions(cam_aligned[:n]) - positions(gt_Ts[:n]), axis=1)
-    plt.figure()
-    plt.plot(np.arange(n), e)
-    plt.xlabel("Frame index"); plt.ylabel("Translational error (m)")
-    plt.title(f"ATE (per-frame) CameraTrajectory | RMSE={m_cam['rmse']:.2f} m")
-
-# 4) Per-keyframe ATE: KF
-if gt_for_kf.size and kf_aligned.size:
-    n2 = min(len(gt_for_kf), len(kf_aligned))
-    e2 = np.linalg.norm(positions(kf_aligned[:n2]) - positions(gt_for_kf[:n2]), axis=1)
-    plt.figure()
-    plt.plot(np.arange(n2), e2)
-    plt.xlabel("Keyframe index"); plt.ylabel("Translational error (m)")
-    plt.title(f"ATE (per-keyframe) KeyFrameTrajectory | RMSE={m_kf['rmse']:.2f} m")
-
-# 5) CDF of ATE
-def cdf(data):
-    xs = np.sort(data); ys = np.linspace(0,1,len(xs),endpoint=False)
-    return xs, ys
-plt.figure()
-if gt_Ts.size and cam_aligned.size:
-    n=min(len(gt_Ts),len(cam_aligned))
-    xs,ys = cdf(np.linalg.norm(positions(cam_aligned[:n])-positions(gt_Ts[:n]),axis=1))
-    plt.plot(xs, ys, label="Cam ATE CDF")
-if gt_for_kf.size and kf_aligned.size:
-    n2=min(len(gt_for_kf),len(kf_aligned))
-    xs2,ys2 = cdf(np.linalg.norm(positions(kf_aligned[:n2])-positions(gt_for_kf[:n2]),axis=1))
-    plt.plot(xs2, ys2, label="KF ATE CDF")
-plt.xlabel("ATE (m)"); plt.ylabel("CDF"); plt.title("Translation error CDF"); plt.legend()
-
-print("Saved metrics CSV at:", METRICS_OUT)
-plt.show()
+print(f"Frames used: {min(len(pos_gt), len(pos_est))}")
+print(f"ATE RMSE: {rmse:.3f} m")
+print(f"Saved plots to: {SAVE_DIR}")
 
