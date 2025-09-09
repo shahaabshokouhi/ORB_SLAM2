@@ -773,7 +773,7 @@ void KeyFrame::ComputeHQBoW()
         mHQBowVec = bowVec;
         mHQFeatVec = featVec;
     }
-    std::cout << "Updated HQ BoW for KF " << mnId << " with " << vDesc.size() << " descriptors." << std::endl;
+    // std::cout << "Updated HQ BoW for KF " << mnId << " with " << vDesc.size() << " descriptors." << std::endl;
 }
 
 void KeyFrame::MarkHQBoWDirty() {

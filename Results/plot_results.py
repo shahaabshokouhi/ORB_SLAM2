@@ -13,7 +13,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
 
-GT_PATH = Path("06.txt")
+GT_PATH = Path("00.txt")
 EST_PATH = Path("CameraTrajectory.txt")
 SAVE_DIR = Path("")
 

@@ -1,40 +1,112 @@
-# This script extends your evaluation to also produce several plots and CSV summaries.
-# It will look for the matches file in /mnt/data and poses.csv in /mnt/data.
-# If poses.csv is missing and USE_POSE_GT=True, it will exit gracefully with a message.
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+# Evaluates BoW vs HQ-BoW using ground truth. Keeps your original plots,
+# and (when KITTI GT is used) restricts GT to *only* the keyframes present
+# in the matches CSV (plus their predicted IDs). Also writes per-query
+# confusion flags (TP/FP/TN/FN) and a labeled copy of the matches CSV.
+#
+# Inputs (defaults):
+#   bow_vs_hqbow_matches.csv   (columns: kf_frame_id, top_bow_frame_ids, top_hqbow_frame_ids)
+#   poses.csv                  (fallback GT mode)
+#   <SEQ>.txt (e.g., 00.txt)   (KITTI GT mode)
+#
+# Outputs:
+#   metrics_summary.csv
+#   metrics_at_k.csv
+#   per_query_counts.csv
+#   overall_metrics_bar.png
+#   recall_vs_k.png
+#   precision_vs_k.png
+#   hit_vs_k.png
+#   rr_improvement_hist.png
+#   first_correct_rank_scatter.png
+#   confusion_by_query.csv
+#   confusion_summary.csv
+#   bow_vs_hqbow_matches_labeled.csv
+#
+# Confusion definitions (per query keyframe q):
+#   TP: q has ≥1 true loop partner AND any suggested keyframe is a true loop (within topK, gap, domain)
+#   FN: q has ≥1 true loop partner BUT none of the suggestions is a true loop
+#   TN: q has no true loop partner AND suggests nothing
+#   FP: q has no true loop partner BUT suggests something
+#
+# True loop definition:
+#   distance <= D_THRESH_M, |Δframe| >= MIN_FRAME_GAP, and (optional) yaw diff <= YAW_THRESH_D
 
 import os, math, csv
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+from scipy.spatial.transform import Rotation
 
-# ---------- CONFIG (update if needed) ----------
-CSV_MATCHES = "bow_vs_hqbow_matches.csv"   # your export
-POSES_CSV   = "poses.csv"                  # dumped alongside
-TOPK_USED   = 10                                     
-MIN_FRAME_GAP = 50                                   
-# Pose GT thresholds:
-D_THRESH_M   = 5.0     
-YAW_THRESH_D = 15.0    
-# If you already have an external GT list, set USE_POSE_GT=False and fill GT_PAIRS_CSV
-USE_POSE_GT  = True
-GT_PAIRS_CSV = None
-# ------------------------------------------------
+# ---------- CONFIG ----------
+CSV_MATCHES     = "bow_vs_hqbow_matches.csv"   # your export
+TOPK_USED       = 10
+MIN_FRAME_GAP   = 50
+
+# === Choose GT source ===
+USE_KITTI_GT    = True                 # set False to use poses.csv / pairs.csv fallback
+KITTI_SEQ_ID    = "01"                 # e.g., "00", "07"
+KITTI_GT_PATH   = f"{KITTI_SEQ_ID}.txt"
+
+# Fallback GT modes (only used if USE_KITTI_GT=False)
+POSES_CSV       = "poses.csv"          # fallback A
+USE_POSE_GT     = True                 # True: use poses.csv; False: use GT_PAIRS_CSV
+GT_PAIRS_CSV    = None                 # fallback B: CSV with two columns i,j of true pairs
+
+# GT thresholds
+D_THRESH_M      = 10.0                  # meters
+YAW_THRESH_D    = 15.0                 # degrees; set None to ignore yaw
+
+KITTI_R_IS_WORLD_FROM_CAM = False  # True if file stores T_w_c; set False if it's T_c_w
+# -----------------------------------------------
+
+def yaw_from_R(R, assume_world_from_cam=True):
+    """
+    Return yaw (rad) as the heading of the camera +Z axis projected on the world XZ plane.
+    If the file stores T_c_w, we invert R via transpose before using it.
+    """
+    R_wc = R if assume_world_from_cam else R.T
+    fwd_world = R_wc[:, 2]                   # camera +Z in world coords
+    # Project onto XZ plane and compute yaw about +Y
+    return math.atan2(fwd_world[0], fwd_world[2])
 
 def parse_list(s):
-    if isinstance(s, float) and np.isnan(s): return []
+    """Robustly parse '12, 57, 103' → [12,57,103]; ignore empty/nan."""
+    if s is None:
+        return []
+    if isinstance(s, float):
+        if np.isnan(s):
+            return []
+        return [int(round(s))]
+    if isinstance(s, (int, np.integer)):
+        return [int(s)]
     s = str(s).strip().strip('"')
-    if not s: return []
-    return [int(x) for x in s.split(',') if x.strip()!='']
+    if not s:
+        return []
+    out = []
+    for tok in s.split(','):
+        t = tok.strip()
+        if not t or t.lower() == "nan":
+            continue
+        try:
+            out.append(int(float(t)))
+        except:
+            pass
+    return out
 
 def load_matches(csv_path):
     df = pd.read_csv(csv_path)
     preds_bow = {}
     preds_hq  = {}
+    queries   = []
     for _, row in df.iterrows():
         q = int(row['kf_frame_id'])
-        preds_bow[q] = parse_list(row['top_bow_frame_ids'])
-        preds_hq[q]  = parse_list(row['top_hqbow_frame_ids'])
-    return preds_bow, preds_hq
+        queries.append(q)
+        preds_bow[q] = parse_list(row.get('top_bow_frame_ids', ""))
+        preds_hq[q]  = parse_list(row.get('top_hqbow_frame_ids', ""))
+    return df, preds_bow, preds_hq, set(queries)
 
 def load_poses(csv_path):
     df = pd.read_csv(csv_path)
@@ -42,6 +114,26 @@ def load_poses(csv_path):
     for _, r in df.iterrows():
         fid = int(r['frame_id'])
         poses[fid] = (float(r['x']), float(r['y']), float(r['z']), float(r['yaw']))
+    return poses
+
+def load_kitti_poses_as_dict(txt_path):
+    """Return {frame_id: (x,y,z,yaw)} from KITTI odometry poses file."""
+    poses = {}
+    if not os.path.exists(txt_path):
+        return poses
+    with open(txt_path, 'r') as f:
+        for fid, line in enumerate(f):
+            vals = line.strip().split()
+            if len(vals) != 12:
+                continue
+            m = list(map(float, vals))
+            T = np.array(m, dtype=float).reshape(3,4)
+            R = T[:,:3]
+            t = T[:,3]
+            # forward = camera z in world; yaw about Y: atan2(x,z)
+            fwd = R[:,2]
+            _, pitch, _ = Rotation.from_matrix(R).as_euler('xyz', degrees=False)
+            poses[fid] = (float(t[0]), float(t[1]), float(t[2]), float(pitch))
     return poses
 
 def ang_diff_deg(a, b):
@@ -59,7 +151,23 @@ def compute_gt_from_poses(poses, min_gap, d_thresh, yaw_thresh):
             xj, yj, zj, yawj = poses[j]
             d = math.sqrt((xi-xj)**2 + (yi-yj)**2 + (zi-zj)**2)
             if d > d_thresh: continue
-            if ang_diff_deg(yawi, yawj) > yaw_thresh: continue
+            if yaw_thresh is not None and ang_diff_deg(yawi, yawj) > yaw_thresh: continue
+            GT[i].add(j)
+    return GT
+
+def build_kitti_gt_restricted(poses, allowed_ids, min_gap, d_thresh_m, yaw_thresh_deg):
+    """GT only over ORB-SLAM keyframes (queries ∪ predicted ids)."""
+    ids = sorted([i for i in allowed_ids if i in poses])
+    GT = {i:set() for i in ids}
+    for i in ids:
+        xi, yi, zi, yawi = poses[i]
+        for j in ids:
+            if j==i: continue
+            if abs(i - j) < min_gap: continue
+            xj, yj, zj, yawj = poses[j]
+            d = math.sqrt((xi-xj)**2 + (yi-yj)**2 + (zi-zj)**2)
+            if d > d_thresh_m: continue
+            if yaw_thresh_deg is not None and ang_diff_deg(yawi, yawj) > yaw_thresh_deg: continue
             GT[i].add(j)
     return GT
 
@@ -73,7 +181,7 @@ def compute_gt_from_pairs(pairs_csv):
     return GT
 
 def metrics_for_prefix(pred_ranked, GT, K):
-    # Returns macro Precision@K, Recall@K, Hit@K, MRR@K and per-query RR@K
+    # macro Precision@K, Recall@K, Hit@K, MRR@K (over queries with non-empty GT)
     precisions, recalls, hits, rr_list = [], [], [], []
     for q, full in pred_ranked.items():
         if q not in GT: 
@@ -101,30 +209,121 @@ def metrics_for_prefix(pred_ranked, GT, K):
     return P, R, HR, MRR, rr_list
 
 def overall_metrics(pred_ranked, GT):
-    # Uses full list (whatever length in CSV rows)
     max_len = max((len(v) for v in pred_ranked.values()), default=0)
     return metrics_for_prefix(pred_ranked, GT, max_len)
+
+def confusion_for_method(method_name, queries, preds, GT, topk, min_gap):
+    """TP/FP/TN/FN per query (definitions above)."""
+    rows = []
+    gt_domain = set(GT.keys())
+    for q in sorted(queries):
+        if q not in GT:
+            # no GT for that KF → skip
+            continue
+        gt_set = GT[q]
+        has_loop = len(gt_set) > 0
+
+        # enforce min gap and GT domain for fairness
+        cand = preds.get(q, [])[:topk]
+        filt = [j for j in cand if (j in gt_domain and abs(q-j) >= min_gap)]
+
+        predicted_any = len(filt) > 0
+        matched = any((j in gt_set) for j in filt)
+
+        tp = int(has_loop and matched)
+        fn = int(has_loop and not matched)
+        tn = int((not has_loop) and (not predicted_any))
+        fp = int((not has_loop) and predicted_any)
+
+        rows.append({
+            "method": method_name,
+            "frame_id": q,
+            "has_loop": int(has_loop),
+            "predicted_any": int(predicted_any),
+            "matched_any_true_loop": int(matched),
+            "TP": tp, "FN": fn, "TN": tn, "FP": fp,
+            "gt_partners_count": len(gt_set),
+            "suggested_count": len(filt),
+            "suggested_ids": ",".join(map(str, filt))
+        })
+    return rows
+
+def summarize_confusion(df):
+    out = []
+    for m in sorted(df['method'].unique()):
+        sub = df[df['method'] == m]
+        TP = int(sub['TP'].sum())
+        FP = int(sub['FP'].sum())
+        TN = int(sub['TN'].sum())
+        FN = int(sub['FN'].sum())
+        total = TP + FP + TN + FN
+        acc  = (TP+TN)/total if total>0 else float('nan')
+        prec = TP/(TP+FP)    if (TP+FP)>0 else float('nan')
+        rec  = TP/(TP+FN)    if (TP+FN)>0 else float('nan')
+        f1   = (2*prec*rec)/(prec+rec) if (prec>0 and rec>0) else float('nan')
+        out.append({"method": m, "TP":TP,"FP":FP,"TN":TN,"FN":FN,"Total":total,
+                    "Accuracy":acc,"Precision":prec,"Recall":rec,"F1":f1})
+    return pd.DataFrame(out)
+
+def export_gt_loops_csv(GT, allowed_ids, out_path="gt_loops_by_keyframe.csv"):
+    """
+    Write one row per keyframe in allowed_ids with its GT loop partners
+    (also restricted to allowed_ids for consistency with evaluation).
+    """
+    rows = []
+    allowed_ids = set(allowed_ids)
+    for i in sorted(allowed_ids):
+        partners = sorted([j for j in GT.get(i, set()) if j in allowed_ids and j != i])
+        rows.append({
+            "frame_id": i,
+            "gt_partners_count": len(partners),
+            "gt_partner_ids": ",".join(map(str, partners))
+        })
+    pd.DataFrame(rows).to_csv(out_path, index=False)
 
 # --- Main workflow ---
 if not os.path.exists(CSV_MATCHES):
     print(f"[WARN] Matches file not found: {CSV_MATCHES}")
 else:
-    preds_bow, preds_hq = load_matches(CSV_MATCHES)
-    if USE_POSE_GT:
-        if not os.path.exists(POSES_CSV):
-            print(f"[WARN] Poses file not found: {POSES_CSV}. Cannot compute GT-based metrics.")
-            GT = None
+    # Load matches
+    df_matches, preds_bow, preds_hq, query_ids = load_matches(CSV_MATCHES)
+
+    # Build the allowed KF universe = queries ∪ all predicted targets
+    allowed_ids = set(query_ids)
+    for v in preds_bow.values(): allowed_ids.update(v)
+    for v in preds_hq.values():  allowed_ids.update(v)
+
+    # Ground truth selection
+    GT = None
+    if USE_KITTI_GT:
+        if not os.path.exists(KITTI_GT_PATH):
+            print(f"[WARN] KITTI GT file not found: {KITTI_GT_PATH}")
         else:
-            poses = load_poses(POSES_CSV)
-            GT = compute_gt_from_poses(poses, MIN_FRAME_GAP, D_THRESH_M, YAW_THRESH_D)
-    else:
-        if GT_PAIRS_CSV is None or not os.path.exists(GT_PAIRS_CSV):
-            print("[WARN] GT_PAIRS_CSV not provided/found. Cannot compute metrics.")
-            GT = None
+            poses = load_kitti_poses_as_dict(KITTI_GT_PATH)
+            if len(poses) == 0:
+                print(f"[WARN] No poses parsed from KITTI file: {KITTI_GT_PATH}")
+            else:
+                # Restrict GT to ORB-SLAM keyframes
+                GT = build_kitti_gt_restricted(poses, allowed_ids, MIN_FRAME_GAP, D_THRESH_M, YAW_THRESH_D)
+
+    if GT is None:
+        if USE_POSE_GT:
+            if not os.path.exists(POSES_CSV):
+                print(f"[WARN] Poses file not found: {POSES_CSV}. Cannot compute GT-based metrics.")
+            else:
+                poses = load_poses(POSES_CSV)
+                GT = compute_gt_from_poses(poses, MIN_FRAME_GAP, D_THRESH_M, YAW_THRESH_D)
         else:
-            GT = compute_gt_from_pairs(GT_PAIRS_CSV)
+            if GT_PAIRS_CSV is None or not os.path.exists(GT_PAIRS_CSV):
+                print("[WARN] GT_PAIRS_CSV not provided/found. Cannot compute metrics.")
+                GT = None
+            else:
+                GT = compute_gt_from_pairs(GT_PAIRS_CSV)
 
     if GT is not None:
+
+        export_gt_loops_csv(GT, allowed_ids, "gt_loops_by_keyframe.csv")
+        
         # Compute metrics @ k = 1..TOPK_USED
         ks = list(range(1, TOPK_USED+1))
         rows = []
@@ -138,31 +337,22 @@ else:
                 "precision_bow": P_bow, "recall_bow": R_bow, "hit_bow": HR_bow, "mrr_bow": MRR_bow,
                 "precision_hq":  P_hq,  "recall_hq":  R_hq,  "hit_hq":  HR_hq,  "mrr_hq":  MRR_hq
             })
-            # store per-query RR@K only for final K to analyze improvements
             if k == TOPK_USED:
-                # Recompute to also capture mapping from query->RR
-                # We'll compute RR per query dictionaries
-                rr_bow_per_q = {}
-                rr_hq_per_q  = {}
+                # per-query RR at final K (for plots)
+                rr_bow_per_q, rr_hq_per_q = {}, {}
                 for q, full in preds_bow.items():
-                    if q not in GT or len(GT[q])==0: 
-                        continue
+                    if q not in GT or len(GT[q])==0: continue
                     pred = full[:k]
                     rr = 0.0
                     for rank, j in enumerate(pred, start=1):
-                        if j in GT[q]:
-                            rr = 1.0 / rank
-                            break
+                        if j in GT[q]: rr = 1.0 / rank; break
                     rr_bow_per_q[q] = rr
                 for q, full in preds_hq.items():
-                    if q not in GT or len(GT[q])==0: 
-                        continue
+                    if q not in GT or len(GT[q])==0: continue
                     pred = full[:k]
                     rr = 0.0
                     for rank, j in enumerate(pred, start=1):
-                        if j in GT[q]:
-                            rr = 1.0 / rank
-                            break
+                        if j in GT[q]: rr = 1.0 / rank; break
                     rr_hq_per_q[q] = rr
                 rr_bow_dict = rr_bow_per_q
                 rr_hq_dict  = rr_hq_per_q
@@ -170,7 +360,7 @@ else:
         df_k = pd.DataFrame(rows)
         df_k.to_csv("metrics_at_k.csv", index=False)
 
-        # Overall metrics using the full length of each list (may be <= TOPK_USED)
+        # Overall metrics using full list lengths
         P_bow_all, R_bow_all, HR_bow_all, MRR_bow_all, _ = overall_metrics(preds_bow, GT)
         P_hq_all,  R_hq_all,  HR_hq_all,  MRR_hq_all,  _ = overall_metrics(preds_hq,  GT)
         summary = pd.DataFrame([{
@@ -189,12 +379,12 @@ else:
         width = 0.35
 
         plt.figure()
-        # grouped bars
         plt.bar(x - width/2, bow_vals, width, label="BoW")
         plt.bar(x + width/2, hq_vals,  width, label="HQ-BoW")
         plt.xticks(x, labels)
         plt.ylabel("Score")
-        plt.title("Overall Metrics (macro-avg over queries)")
+        ttl_seq = KITTI_SEQ_ID if USE_KITTI_GT else "poses.csv"
+        plt.title(f"Overall Metrics (GT: {ttl_seq})")
         plt.legend()
         plt.tight_layout()
         plt.savefig("overall_metrics_bar.png")
@@ -237,7 +427,6 @@ else:
         plt.close()
 
         # 5) Histogram: RR improvement at k=TOPK_USED  (HQ - BoW)
-        # Align keys
         common_qs = sorted(set(rr_bow_dict.keys()) | set(rr_hq_dict.keys()))
         diff = []
         for q in common_qs:
@@ -255,11 +444,9 @@ else:
             plt.close()
 
         # 6) Scatter: rank of first correct (BoW) vs (HQ) at k=TOPK_USED
-        # For queries without any correct in top-k, treat as rank = TOPK_USED + 1
         ranks_bow = []
         ranks_hq  = []
         for q in common_qs:
-            # compute rank for bow
             pred_b = preds_bow.get(q, [])[:TOPK_USED]
             pred_h = preds_hq.get(q, [])[:TOPK_USED]
             gt = GT.get(q, set())
@@ -274,7 +461,6 @@ else:
                 if j in gt:
                     rh = rank
                     break
-            # only include if at least one has a finite rank (<= TOPK_USED)
             if rb <= TOPK_USED or rh <= TOPK_USED:
                 ranks_bow.append(rb)
                 ranks_hq.append(rh)
@@ -289,7 +475,7 @@ else:
             plt.savefig("first_correct_rank_scatter.png")
             plt.close()
 
-        # Save a per-query counts file (like before)
+        # Per-query counts table (like before)
         rows = []
         all_queries = sorted(set(list(preds_bow.keys()) + list(preds_hq.keys())))
         for q in all_queries:
@@ -306,25 +492,67 @@ else:
         per_query_df = pd.DataFrame(rows)
         per_query_df.to_csv("per_query_counts.csv", index=False)
 
-        # Display the summary tables to the user
-        try:
-            from caas_jupyter_tools import display_dataframe_to_user
-            display_dataframe_to_user("Metrics summary", summary)
-            display_dataframe_to_user("Metrics@k", df_k)
-            display_dataframe_to_user("Per-query counts", per_query_df)
-        except Exception as e:
-            print("Could not display dataframes interactively:", e)
+        # ---- Confusion tables (TP/FP/TN/FN per query) ----
+        conf_bow = confusion_for_method("BoW", all_queries, preds_bow, GT, TOPK_USED, MIN_FRAME_GAP)
+        conf_hq  = confusion_for_method("HQ-BoW", all_queries, preds_hq,  GT, TOPK_USED, MIN_FRAME_GAP)
+        conf_df = pd.DataFrame(conf_bow + conf_hq)
+        conf_df.to_csv("confusion_by_query.csv", index=False)
+
+        conf_sum = summarize_confusion(conf_df)
+        conf_sum.to_csv("confusion_summary.csv", index=False)
+
+        # ---- Labeled copy of matches CSV with confusion flags ----
+        # Merge BoW/HQ flags side-by-side per query
+        bow_flags = conf_df[conf_df["method"]=="BoW"].drop(columns=["method"]).rename(
+            columns={
+                "predicted_any":"bow_predicted_any",
+                "matched_any_true_loop":"bow_matched_any_true_loop",
+                "TP":"bow_TP","FP":"bow_FP","TN":"bow_TN","FN":"bow_FN",
+                "gt_partners_count":"bow_gt_partners_count",
+                "suggested_count":"bow_suggested_count",
+                "suggested_ids":"bow_suggested_ids"
+            }
+        )
+        hq_flags = conf_df[conf_df["method"]=="HQ-BoW"].drop(columns=["method"]).rename(
+            columns={
+                "predicted_any":"hq_predicted_any",
+                "matched_any_true_loop":"hq_matched_any_true_loop",
+                "TP":"hq_TP","FP":"hq_FP","TN":"hq_TN","FN":"hq_FN",
+                "gt_partners_count":"hq_gt_partners_count",
+                "suggested_count":"hq_suggested_count",
+                "suggested_ids":"hq_suggested_ids"
+            }
+        )
+        labeled = df_matches.merge(bow_flags, how="left", left_on="kf_frame_id", right_on="frame_id")
+        labeled = labeled.drop(columns=["frame_id"])
+        labeled = labeled.merge(hq_flags, how="left", left_on="kf_frame_id", right_on="frame_id")
+        labeled = labeled.drop(columns=["frame_id"])
+        # unify has_loop (they're the same in both; keep BoW's)
+        if "has_loop" in labeled.columns:
+            labeled = labeled.rename(columns={"has_loop":"has_loop_bow"})
+        if "has_loop_bow" in labeled.columns and "has_loop" in hq_flags.columns:
+            labeled["has_loop_hq"] = labeled["has_loop_bow"]  # identical by construction
+        labeled.to_csv("bow_vs_hqbow_matches_labeled.csv", index=False)
 
         print("Saved outputs:")
-        print(" - metrics_summary.csv")
-        print(" - metrics_at_k.csv")
-        print(" - per_query_counts.csv")
-        print(" - overall_metrics_bar.png")
-        print(" - recall_vs_k.png")
-        print(" - precision_vs_k.png")
-        print(" - hit_vs_k.png")
-        print(" - rr_improvement_hist.png")
-        print(" - first_correct_rank_scatter.png")
+        for fn in [
+            "metrics_summary.csv",
+            "metrics_at_k.csv",
+            "per_query_counts.csv",
+            "confusion_by_query.csv",
+            "confusion_summary.csv",
+            "bow_vs_hqbow_matches_labeled.csv",
+            "overall_metrics_bar.png",
+            "recall_vs_k.png",
+            "precision_vs_k.png",
+            "hit_vs_k.png",
+            "rr_improvement_hist.png",
+            "first_correct_rank_scatter.png",
+        ]:
+            if os.path.exists(fn):
+                print(" -", fn)
+
     else:
         print("Ground truth not available; cannot compute metrics or plots. "
-              "Please ensure Poses CSV or GT pairs are provided.")
+              "Enable USE_KITTI_GT with a valid KITTI file (e.g., 00.txt), "
+              "or provide poses.csv / pairs CSV.")
