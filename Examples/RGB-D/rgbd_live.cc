@@ -112,18 +112,20 @@ int main(int argc, char** argv)
         // float raw_depth = imDepth.at<uint16_t>(cy, cx);
         // std::cout << "Center pixel depth: " << center_depth << " meters, raw depth: " << raw_depth << " mm" << std::endl;
         // Loop over every pixel (u, v):
-        cv::Mat depth_meter = cv::Mat(depth_h, depth_w, CV_32FC1); // one float per pixel
-        for (int v = 0; v < depth_h; v++)
-        {
-            for (int u = 0; u < depth_w; u++)
-            {
-                // get_distance(u,v) is valid on rs2::depth_frame
-                float z = depth_frame.get_distance(u, v);
-                depth_meter.at<float>(v, u) = z; 
-                // z is in meters. If no depth, z == 0.
-            }
-        }
 
+        // cv::Mat depth_meter = cv::Mat(depth_h, depth_w, CV_32FC1); // one float per pixel
+        // for (int v = 0; v < depth_h; v++)
+        // {
+        //     for (int u = 0; u < depth_w; u++)
+        //     {
+        //         // get_distance(u,v) is valid on rs2::depth_frame
+        //         float z = depth_frame.get_distance(u, v);
+        //         depth_meter.at<float>(v, u) = z; 
+        //         // z is in meters. If no depth, z == 0.
+        //     }
+        // }
+        cv::Mat depth_meter;
+        imDepth.convertTo(depth_meter, CV_32F, 1.0/1000.0);
         // h) Compute timestamp for this frame (in seconds)
         //    RealSense's get_timestamp() returns milliseconds since start.
         double tframe = depth_frame.get_timestamp() / 1000.0;
@@ -144,9 +146,12 @@ int main(int argc, char** argv)
     SLAM.Shutdown();
     cv::destroyAllWindows();
 
-    // 8) (Optional) Save trajectories if desired
-    SLAM.SaveTrajectoryTUM("CameraTrajectory.txt");
-    SLAM.SaveKeyFrameTrajectoryTUM("KeyFrameTrajectory.txt");
+    // Save camera trajectory
+    SLAM.SaveTrajectoryKITTI("Results/CameraTrajectory.txt");
+    cout << "Saving BoW comparison to bow_vs_hqbow_matches.csv" << endl;
+    SLAM.mpHQmanager->ExportBoWTopMatchesCSV("Results/bow_vs_hqbow_matches.csv", /*topK=*/10);
+    SLAM.mpHQmanager->ExportMapPointDescriptorsCSV("Results/mappoint_descriptors.csv");
+    cout << "Done." << endl;
 
     return 0;
 }
