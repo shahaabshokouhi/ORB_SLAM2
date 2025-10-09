@@ -31,6 +31,7 @@ public:
     void SetCriteria(const std::string criteria);
     void ExportBowTopMatches(const std::string& csv_path, int topK = 10);
     void ExportBoWTopMatchesCSV(const std::string& csv_path, int topK = 10, int minFrameGap = 50);
+    void ExportMapPointDescriptorsCSV(const std::string& csv_path);
 private:
     void ApplyToMapPoint(MapPoint* pMP, bool isHQ);
 

@@ -47,7 +47,7 @@ MIN_FRAME_GAP   = 50
 
 # === Choose GT source ===
 USE_KITTI_GT    = True                 # set False to use poses.csv / pairs.csv fallback
-KITTI_SEQ_ID    = "01"                 # e.g., "00", "07"
+KITTI_SEQ_ID    = "00"                 # e.g., "00", "07"
 KITTI_GT_PATH   = f"{KITTI_SEQ_ID}.txt"
 
 # Fallback GT modes (only used if USE_KITTI_GT=False)

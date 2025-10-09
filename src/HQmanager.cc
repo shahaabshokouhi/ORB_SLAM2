@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <sstream>
 #include <cmath>
+#include <iomanip>
 
 using namespace std;
 namespace ORB_SLAM2
@@ -46,7 +47,7 @@ void HighQualityManager::Run()
         // Thresholds (tune here)
         // ----------------------------
         const int   kMinObs                = 6;      // baseline
-        const float kMinFoundRatio         = 0.50f;  // 0.25..0.5 typical
+        const float kMinFoundRatio         = 0.90f;  // 0.25..0.5 typical
         const int   kMaxScaleLevelDiff     = 1;      // |oct - pred| <= 1
         const float kMinViewCos            = 0.70f;  // cos(60 deg)
         const int   kMinGoodFracPercent    = 60;     // % observations meeting geom checks
@@ -132,6 +133,30 @@ static std::string JoinIds(const std::vector<long unsigned int>& ids, const char
     std::ostringstream oss;
     for (size_t i=0;i<ids.size();++i){ if(i) oss<<sep; oss<<ids[i]; }
     return oss.str();
+}
+
+static std::string DescriptorRowToHex(const cv::Mat& row) {
+    if (row.empty()) return std::string();
+
+    // Ensure 1x32 CV_8U
+    cv::Mat d = row;
+    if (d.rows != 1 && d.cols == 32) d = d.reshape(1, 1); // to 1x32
+    if (d.type() != CV_8U) {
+        cv::Mat tmp;
+        d.convertTo(tmp, CV_8U);
+        d = tmp;
+    }
+
+    static const char* HEX = "0123456789abcdef";
+    std::string out;
+    out.resize(d.cols * 2);
+
+    const unsigned char* p = d.ptr<unsigned char>(0);
+    for (int c = 0; c < d.cols; ++c) {
+        out[2*c]     = HEX[p[c] >> 4];
+        out[2*c + 1] = HEX[p[c] & 0x0F];
+    }
+    return out;
 }
 
 void HighQualityManager::ExportBoWTopMatchesCSV(const std::string& csv_path,
@@ -257,10 +282,97 @@ void HighQualityManager::ExportBoWTopMatchesCSV(const std::string& csv_path,
     }
     pofs.close();
 
+    // Map summary csv
+    std::string map_summary_path;
+    {
+        size_t slash = csv_path.find_last_of("/\\");
+        std::string dir = (slash == std::string::npos) ? std::string() : csv_path.substr(0, slash+1);
+        map_summary_path = dir + "map_summary.csv";
+    }
+
+    std::ofstream mofs(map_summary_path.c_str());
+    mofs << "num_keyframes,num_mappoints,num_hqmappoints\n";
+    mofs << vKFs.size() << "," << mpMap->GetAllMapPoints().size() << "," << mpMap->GetHighQualityMapPoints().size() << "\n";
+
     std::cout << "[HQManager] Exported BoW comparison CSV to " << csv_path
               << " and poses to " << poses_path
               << " (topK=" << topK << ", minFrameGap=" << minFrameGap << ")\n";
 }
+
+
+void HighQualityManager::ExportMapPointDescriptorsCSV(const std::string& csv_path)
+{
+    if (!mpMap) return;
+
+    // Use HQ points; switch to GetAllMapPoints() if you want everything
+    std::vector<MapPoint*> vMPs = mpMap->GetHighQualityMapPoints();
+    vMPs.erase(std::remove_if(vMPs.begin(), vMPs.end(),
+                              [](MapPoint* p){ return !p || p->isBad(); }),
+               vMPs.end());
+    if (vMPs.empty()) return;
+
+    std::ofstream ofs(csv_path.c_str());
+    if (!ofs.is_open()) {
+        std::cerr << "[HQManager] Failed to open " << csv_path << " for writing.\n";
+        return;
+    }
+
+    ofs << std::fixed << std::setprecision(6);
+    // One row per MapPoint
+    // observations = "kfId;kfId;kfId;..."
+    ofs << "mp_id,mp_x,mp_y,mp_z,descriptor_hex,observations\n";
+
+    size_t rows_written = 0;
+
+    for (MapPoint* pMP : vMPs) {
+        if (!pMP) continue;
+
+        // 3D position
+        cv::Mat Xw = pMP->GetWorldPos();  // 3x1, CV_32F
+        double X = 0.0, Y = 0.0, Z = 0.0;
+        if (!Xw.empty() && Xw.rows >= 3 && Xw.cols >= 1) {
+            X = static_cast<double>(Xw.at<float>(0));
+            Y = static_cast<double>(Xw.at<float>(1));
+            Z = static_cast<double>(Xw.at<float>(2));
+        }
+
+        // Descriptor from MapPoint itself
+        std::string hex = DescriptorRowToHex(pMP->GetDescriptor()); // ensure forward decl/def exists
+
+        // Gather observing KeyFrame IDs (unique, sorted)
+        const std::map<KeyFrame*, size_t> obs = pMP->GetObservations();
+        if (obs.empty()) continue;
+
+        std::vector<long unsigned int> kf_ids;
+        kf_ids.reserve(obs.size());
+        for (const auto& kv : obs) {
+            KeyFrame* pKF = kv.first;
+            if (!pKF || pKF->isBad()) continue;
+            kf_ids.push_back(pKF->mnId);
+        }
+        if (kf_ids.empty()) continue;
+        std::sort(kf_ids.begin(), kf_ids.end());
+        kf_ids.erase(std::unique(kf_ids.begin(), kf_ids.end()), kf_ids.end());
+
+        std::ostringstream obss;
+        for (size_t i = 0; i < kf_ids.size(); ++i) {
+            if (i) obss << ';';
+            obss << kf_ids[i];
+        }
+
+        ofs << pMP->mnId << ","
+            << X << "," << Y << "," << Z << ","
+            << "\"" << hex << "\","
+            << "\"" << obss.str() << "\"\n";
+
+        ++rows_written;
+    }
+
+    ofs.close();
+    std::cout << "[HQManager] Exported " << rows_written
+              << " MapPoints to " << csv_path << "\n";
+}
+
 
 
 }
