@@ -1,0 +1,1 @@
+./Examples/recorder_rgbd ./record_data

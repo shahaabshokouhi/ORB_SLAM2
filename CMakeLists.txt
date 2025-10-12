@@ -113,6 +113,13 @@ target_link_libraries(rgbd_live
   ${REALSENSE2_LIBRARY}
 )
 
+## RBG-D collect data
+add_executable(recorder_rgbd    Examples/RGB-D/recorder_rgbd.cc)
+target_link_libraries(recorder_rgbd PRIVATE 
+  ${OpenCV_LIBS} 
+  ${REALSENSE2_LIBRARY}
+)
+
 ## Stereo
 set_target_properties(ORB_SLAM2 PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/Examples/Stereo
