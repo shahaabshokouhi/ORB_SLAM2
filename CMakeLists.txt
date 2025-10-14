@@ -113,6 +113,14 @@ target_link_libraries(rgbd_live
   ${REALSENSE2_LIBRARY}
 )
 
+## RGB-D Offline (RealSense)
+add_executable(rgbd_offline    Examples/RGB-D/rgbd_offline.cc)
+target_link_libraries(rgbd_offline
+  ORB_SLAM2
+  ${OpenCV_LIBS}
+  ${REALSENSE2_LIBRARY}
+)
+
 ## RBG-D collect data
 add_executable(recorder_rgbd    Examples/RGB-D/recorder_rgbd.cc)
 target_link_libraries(recorder_rgbd PRIVATE 

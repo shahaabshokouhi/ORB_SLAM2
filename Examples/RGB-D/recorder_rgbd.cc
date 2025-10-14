@@ -101,6 +101,13 @@ static void write_calib_yaml(const rs2::video_stream_profile& color_vsp,
     fs.release();
 }
 
+static std::string index_name(size_t k, int width)
+{
+    std::ostringstream oss;
+    oss << std::setw(width) << std::setfill('0') << k;
+    return oss.str();
+}
+
 int main(int argc, char** argv)
 {
     if (argc < 2) {
@@ -110,7 +117,7 @@ int main(int argc, char** argv)
     const std::string out_dir  = argv[1];
     const long max_frames      = (argc>=3)? std::stol(argv[2]) : -1;
     const int fps_limit        = (argc>=4)? std::stoi(argv[3]) : 30;
-    const int save_every = (argc >= 5) ? std::stoi(argv[4]) : 15; // save every N frames
+    const int save_every = (argc >= 5) ? std::stoi(argv[4]) : 1; // save every N frames
     std::signal(SIGINT, sigint_handler);
 
     // Make folders
@@ -146,6 +153,9 @@ int main(int argc, char** argv)
         std::chrono::system_clock::now().time_since_epoch()).count();
 
     long frame_idx = 0;
+    size_t saved_idx = 0;
+    const int pad_digits = 6;
+
     clock_steady::time_point t_prev = clock_steady::now();
 
     while (!g_stop && (max_frames < 0 || frame_idx < max_frames)) {
@@ -170,8 +180,9 @@ int main(int argc, char** argv)
 
 
         if (frame_idx % save_every == 0) {
-            std::string name_rgb = fmt_ts(t_rgb) + ".png";
-            std::string name_d   = fmt_ts(t_d)   + ".png";
+            const std::string stem = index_name(saved_idx, pad_digits);
+            const std:: string name_rgb = stem + ".png";
+            const std:: string name_d   = stem + ".png";
 
             bool ok1 = cv::imwrite(out_dir + "/rgb/"   + name_rgb, bgr);
             bool ok2 = cv::imwrite(out_dir + "/depth/" + name_d,   depth_mm);
@@ -180,6 +191,7 @@ int main(int argc, char** argv)
             } else {
                 assoc << fmt_ts(t_rgb) << " rgb/"  << name_rgb << " "
                     << fmt_ts(t_d)   << " depth/"<< name_d   << "\n";
+                ++saved_idx;
             }
         }
 

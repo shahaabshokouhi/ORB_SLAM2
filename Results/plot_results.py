@@ -116,7 +116,7 @@ plt.ylabel("Z (m)")
 plt.legend()
 plt.grid(True)
 plt.tight_layout()
-plt.savefig(SAVE_DIR / "trajectory_topdown.png", dpi=150)
+plt.show()
 
 # --- Plot 2: Per-frame position error ---
 plt.figure(figsize=(8, 4))
@@ -127,7 +127,7 @@ plt.ylabel("Euclidean position error (m)")
 plt.legend()
 plt.grid(True)
 plt.tight_layout()
-plt.savefig(SAVE_DIR / "error_per_frame.png", dpi=150)
+plt.show()
 
 # --- Plot 3: Cumulative position error ---
 plt.figure(figsize=(8, 4))
@@ -138,7 +138,7 @@ plt.ylabel("Accumulated error (m)")
 plt.legend()
 plt.grid(True)
 plt.tight_layout()
-plt.savefig(SAVE_DIR / "error_cumulative.png", dpi=150)
+plt.show()
 
 print(f"Frames used: {min(len(pos_gt), len(pos_est))}")
 print(f"ATE RMSE: {rmse:.3f} m")

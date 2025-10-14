@@ -125,7 +125,7 @@ def plot_topdown_overlay(map_pts_xyz: np.ndarray,
     ax.grid(True, linestyle="--", alpha=0.5)
     ax.legend()
     plt.tight_layout()
-    plt.savefig(save_path, dpi=150)
+    plt.show()
     print(f"Saved top-down overlay: {save_path.resolve()}")
 
 def plot_3d_overlay(map_pts_xyz: np.ndarray,
@@ -147,7 +147,7 @@ def plot_3d_overlay(map_pts_xyz: np.ndarray,
     ax.legend(loc="upper left")
     set_axes_equal_3d(ax)
     plt.tight_layout()
-    plt.savefig(save_path, dpi=150)
+    plt.show()
     print(f"Saved 3D overlay: {save_path.resolve()}")
 
 # ------------------------ Run -------------------------

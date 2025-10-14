@@ -60,7 +60,7 @@ plt.grid(True, linestyle="--", alpha=0.5)
 plt.legend()
 plt.tight_layout()
 out_path = SAVE_DIR / "trajectory_topdown_est.png"
-plt.savefig(out_path, dpi=150)
+plt.show()
 
 print(f"Frames plotted: {len(pos_est)}")
 print(f"Saved: {out_path.resolve()}")
