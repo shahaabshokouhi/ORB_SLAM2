@@ -148,6 +148,13 @@ target_link_libraries(mono_tum   ORB_SLAM2)
 target_link_libraries(mono_kitti ORB_SLAM2)
 target_link_libraries(mono_euroc ORB_SLAM2)
 
+## Map Mperger
+add_executable(merg_maps      Examples/MapMerger/merg_maps.cc)
+target_link_libraries(merg_maps
+  ORB_SLAM2
+  ${OpenCV_LIBS}
+)
+
 # 10) system-wide install
 install(
   TARGETS ORB_SLAM2

@@ -1,1 +1,1 @@
-./Examples/recorder_rgbd ./record_data
+./Examples/recorder_rgbd ./record_data/station

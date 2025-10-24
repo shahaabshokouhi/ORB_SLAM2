@@ -140,6 +140,7 @@ static std::string DescriptorRowToHex(const cv::Mat& row) {
 
     // Ensure 1x32 CV_8U
     cv::Mat d = row;
+
     if (d.rows != 1 && d.cols == 32) d = d.reshape(1, 1); // to 1x32
     if (d.type() != CV_8U) {
         cv::Mat tmp;
@@ -348,7 +349,7 @@ void HighQualityManager::ExportMapPointDescriptorsCSV(const std::string& csv_pat
         for (const auto& kv : obs) {
             KeyFrame* pKF = kv.first;
             if (!pKF || pKF->isBad()) continue;
-            kf_ids.push_back(pKF->mnId);
+            kf_ids.push_back(pKF->mnFrameId);
         }
         if (kf_ids.empty()) continue;
         std::sort(kf_ids.begin(), kf_ids.end());
