@@ -5,6 +5,7 @@
 #include <iostream>
 #include <queue>
 #include <random>
+#include <cmath>
 
 #include <opencv2/core/matx.hpp>
 #include <opencv2/core/types.hpp>
@@ -39,6 +40,7 @@ struct RansacSE3{
     bool ok = false;
 };
 struct EstSE3Weighted {SE3 T; int inliers=0; double score=0.0;};
+struct PairEst {Pair pair; RansacSE3 est;};
 
 // helper function to slplit string on a single char
 static std::vector<std::string> split(const std::string& s, char delim)
@@ -405,45 +407,74 @@ static RansacSE3 estimate_se3_ransac(
     return out;
 }
 
-static cv::Vec4d matR_to_quat(const cv::Matx33d& R) {
-    cv::Matx33d M = R;
-    double t = M(0,0)+M(1,1)+M(2,2);
-    cv::Vec4d q;
-    if (t > 0) {
-        double s = std::sqrt(t+1.0) * 2.0;
-        q[0] = 0.25 * s;
-        q[1] = (M(2,1)-M(1,2)) / s;
-        q[2] = (M(0,2)-M(2,0)) / s;
-        q[3] = (M(1,0)-M(0,1)) / s;
+static cv::Vec4d matR_to_quat(const cv::Matx33d& Rm) 
+{
+    // Returns quaternion as (w, x, y, z)
+    const double m00 = Rm(0,0), m01 = Rm(0,1), m02 = Rm(0,2);
+    const double m10 = Rm(1,0), m11 = Rm(1,1), m12 = Rm(1,2);
+    const double m20 = Rm(2,0), m21 = Rm(2,1), m22 = Rm(2,2);
+
+    double trace = m00 + m11 + m22;
+    double w, x, y, z;
+
+    if (trace > 0.0) {
+        double s = std::sqrt(trace + 1.0) * 2.0; // s = 4*w
+        w = 0.25 * s;
+        x = (m21 - m12) / s;
+        y = (m02 - m20) / s;
+        z = (m10 - m01) / s;
     } else {
-        int i = 0; if (M(1,1) > M(0,0)) i = 1; if (M(2,2) > M(i,i)) i = 2;
-        static int nxt[3] = {1,2,0};
-        int j = nxt[i], k = nxt[j];
-        double s = std::sqrt((M(i,i)-M(j,j)-M(k,k))+1.0) * 2.0;
-        double qi = 0.25 * s;
-        double q0 = (M(k,j)-M(j,k)) / s;
-        double qj = (M(j,i)+M(i,j)) / s;
-        double qk = (M(k,i)+M(i,k)) / s;
-        q[0]=q0; q[1]=q2=q3=0.0; // init
-        if (i==0){ q[1]=qi; q[2]=qj; q[3]=qk; }
-        if (i==1){ q[2]=qi; q[1]=qj; q[3]=qk; }
-        if (i==2){ q[3]=qi; q[1]=qj; q[2]=qk; }
+        // find largest diagonal
+        if (m00 > m11 && m00 > m22) {
+            double s = std::sqrt(1.0 + m00 - m11 - m22) * 2.0; // s = 4*x
+            w = (m21 - m12) / s;
+            x = 0.25 * s;
+            y = (m01 + m10) / s;
+            z = (m02 + m20) / s;
+        } else if (m11 > m22) {
+            double s = std::sqrt(1.0 + m11 - m00 - m22) * 2.0; // s = 4*y
+            w = (m02 - m20) / s;
+            x = (m01 + m10) / s;
+            y = 0.25 * s;
+            z = (m12 + m21) / s;
+        } else {
+            double s = std::sqrt(1.0 + m22 - m00 - m11) * 2.0; // s = 4*z
+            w = (m10 - m01) / s;
+            x = (m02 + m20) / s;
+            y = (m12 + m21) / s;
+            z = 0.25 * s;
+        }
     }
-    return q;
+
+    // Normalize to be safe
+    double n = std::sqrt(w*w + x*x + y*y + z*z);
+    if (n > 0) { w/=n; x/=n; y/=n; z/=n; }
+    return cv::Vec4d(w, x, y, z);
 }
 
-static cv::Matx33d quat_to_matR(const cv::Vec4d& q) {
-    cv::Vec4d qq = q;
-    double n = std::sqrt(qq[0]*qq[0]+qq[1]*qq[1]+qq[2]*qq[2]+qq[3]*qq[3]);
-    if (n==0) return cv::Matx33d::eye();
-    for (int i=0;i<4;++i) qq[i] /= n;
-    double w=qq[0], x=qq[1], y=qq[2], z=qq[3];
+static cv::Matx33d quat_to_matR(const cv::Vec4d& qin) 
+{
+    // q = (w, x, y, z)
+    double w = qin[0], x = qin[1], y = qin[2], z = qin[3];
+    double n = std::sqrt(w*w + x*x + y*y + z*z);
+    if (n == 0.0) return cv::Matx33d::eye();
+    w/=n; x/=n; y/=n; z/=n;
+
     cv::Matx33d R;
-    R(0,0)=1-2*(y*y+z*z); R(0,1)=2*(x*y - z*w); R(0,2)=2*(x*z + y*w);
-    R(1,0)=2*(x*y + z*w); R(1,1)=1-2*(x*x+z*z); R(1,2)=2*(y*z - x*w);
-    R(2,0)=2*(x*z - y*w); R(2,1)=2*(y*z + x*w); R(2,2)=1-2*(x*x+y*y);
+    R(0,0) = 1 - 2*(y*y + z*z);
+    R(0,1) = 2*(x*y - z*w);
+    R(0,2) = 2*(x*z + y*w);
+
+    R(1,0) = 2*(x*y + z*w);
+    R(1,1) = 1 - 2*(x*x + z*z);
+    R(1,2) = 2*(y*z - x*w);
+
+    R(2,0) = 2*(x*z - y*w);
+    R(2,1) = 2*(y*z + x*w);
+    R(2,2) = 1 - 2*(x*x + y*y);
     return R;
 }
+
 
 static SE3 fuse_transforms_weighted(const std::vector<EstSE3Weighted>& ests)
 {
@@ -462,20 +493,35 @@ static SE3 fuse_transforms_weighted(const std::vector<EstSE3Weighted>& ests)
         }
 
         for (int i=0;i<4;++i) qsum[i] += w * q[i];
+        tsum += w * e.T.t;
+        W +=w;
     }
 
+    for (int i=0; i<4; ++i) qsum[i] /= std::max(1e-9, W);
+    tsum /= std::max(1e-9, W);
 
-
+    SE3 T;
+    T.R = quat_to_matR(qsum);
+    T.t = tsum;
+    return T;
 }
 
 int main(int argc, char** argv)
 {
+    // parameters
+    const float ratio = 0.9f;
+    const int maxHam = 60;
+    const double ransac_thresh = 0.07; // meters
+    const int ransac_min_inl = 20;
+    const int ransac_iters = 1000;
+    
     std::unordered_map<int, std::vector<cv::Mat>> kf2descs_1, kf2descs_2;
     std::unordered_map<int, std::vector<cv::Point3f>> kf2pts_1, kf2pts_2;
     std::unordered_map<int, std::vector<int>> kf2mp_1, kf2mp_2;
     std::unordered_map<int, DBoW2::BowVector> kf2bow_1, kf2bow_2;
     std::unordered_map<int, DBoW2::FeatureVector> kf2feat_1, kf2feat_2;
     std::unordered_map<int, std::vector<Candidate>> matched_frames;
+    std::vector<PairEst> pair_ests;
 
     ORBVocabulary voc;
     if (!voc.loadFromTextFile("./Vocabulary/ORBvoc.txt")) {
@@ -578,8 +624,42 @@ int main(int argc, char** argv)
     }
 
     std::cout << "Best pair size: " << best_pairs.size() << std::endl;
+    
+    pair_ests.reserve(best_pairs.size());
+    for (const auto& pr : best_pairs) {
+        Pairs3D pairs = build_3d_pairs_from_kf(
+            pr.kf1, pr.kf2,
+            kf2descs_1, kf2descs_2,
+            kf2pts_1, kf2pts_2,
+            ratio, maxHam);
 
+        if (pairs.P1.size() < 3) continue;
 
+        RansacSE3 r = estimate_se3_ransac(
+            pairs.P1, pairs.P2, ransac_thresh, ransac_iters, ransac_min_inl, 1234);
+
+        if (r.ok) {
+            std::cout << "KF " << pr.kf1 << " and KF " << pr.kf2
+                      << " : inliers = " << r.inliers.size()
+                      << " of " << pairs.P1.size() << "\n";
+            pair_ests.push_back({pr, r});
+        }
+    }
+
+    std::vector<EstSE3Weighted> ests;
+    ests.reserve(pair_ests.size());
+    for (const auto& pe : pair_ests) {
+        EstSE3Weighted e;
+        e.T = pe.est.model;
+        e.inliers = (int)pe.est.inliers.size();
+        e.score = pe.pair.score;
+        ests.push_back(e);
+    }
+
+    SE3 T_map2_from_map1 = fuse_transforms_weighted(ests);
+    std::cout << "\nFused transform T_map2 <-- map1:\n"
+              << "R = \n" << cv::Mat(T_map2_from_map1.R) << "\n"
+              << "t = " << T_map2_from_map1.t << "\n";
     
 
     return 0;
