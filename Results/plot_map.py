@@ -36,9 +36,10 @@ def plot_topdown_2d(pts: np.ndarray, title: str = "MapPoints (top-down: Z vs -X)
     ax.set_title(title)
 
     # Fixed limits [-200, 200] on both axes
-    ax.set_xlim(-400, 400)
-    ax.set_ylim(-400, 400)
+    ax.set_xlim(-5, 5)
+    ax.set_ylim(-5, 5)
     ax.set_aspect('equal', adjustable='box')
+    ax.grid(True)
 
     plt.tight_layout()
     plt.show()

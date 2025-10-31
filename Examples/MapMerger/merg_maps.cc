@@ -6,6 +6,7 @@
 #include <queue>
 #include <random>
 #include <cmath>
+#include <iomanip>
 
 #include <opencv2/core/matx.hpp>
 #include <opencv2/core/types.hpp>
@@ -506,6 +507,72 @@ static SE3 fuse_transforms_weighted(const std::vector<EstSE3Weighted>& ests)
     return T;
 }
 
+static inline cv::Point3f apply_se3(const SE3& T, const cv::Point3f& p)
+{
+    cv::Vec3d x(p.x, p.y, p.z);
+    cv::Vec3d y = T.R * x + T.t;
+    return cv::Point3f((float)y[0], (float)y[1], (float)y[2]);
+}
+
+static std::vector<cv::Point3f> unique_points_by_mpid(
+    const std::unordered_map<int, std::vector<cv::Point3f>>& kf2pts,
+    const std::unordered_map<int, std::vector<int>>& kf2mp,
+    bool average_duplicates = false)
+{
+    struct Acc {cv::Vec3d sum; int cnt=0;};
+    std::unordered_map<int, Acc> acc; // mp_id -> accumulator
+    acc.reserve(100000);
+
+    for (const auto& kv : kf2pts) {
+        int kf = kv.first;
+        const auto& pts = kv.second;
+
+        auto it = kf2mp.find(kf);
+        if (it == kf2mp.end()) continue;
+
+        const auto& mpids = it->second;
+        if (mpids.size() != pts.size()) continue;
+
+        for (size_t i=0; i<pts.size(); ++i) {
+            int id = mpids[i];
+            auto& a = acc[id];
+            if (average_duplicates) {
+                a.sum += cv::Vec3d(pts[i].x, pts[i].y, pts[i].z);
+                a.cnt += 1;
+            } else {
+                if (a.cnt == 0) {
+                    a.sum = cv::Vec3d(pts[i].x, pts[i].y, pts[i].z);
+                    a.cnt = 1;
+                }
+            }
+        }
+    }
+
+    std::vector<cv::Point3f> out;
+    out.reserve(acc.size());
+    for (auto& kv : acc) {
+        const auto& a = kv.second;
+        if (a.cnt <= 0) continue;
+        cv::Vec3d m = (a.cnt > 0) ? (a.sum * (1.0 / a.cnt)) : a.sum;
+        out.emplace_back((float)m[0], (float)m[1], (float)m[2]);
+    }
+    return out;
+}
+
+static bool write_points_csv(const std::string& path,
+                             const std::vector<cv::Point3f> pts,
+                             const char* header = "x,y,z")
+{
+    std::ofstream ofs(path);
+    if (!ofs.is_open()) return false;
+    ofs << header << "\n";
+    ofs.setf(std::ios::fixed); ofs << std::setprecision(6);
+    for (const auto& p : pts) {
+        ofs << p.x << "," << p.y << "," << p.z << "\n";
+    }
+    return true;
+}
+
 int main(int argc, char** argv)
 {
     // parameters
@@ -661,6 +728,31 @@ int main(int argc, char** argv)
               << "R = \n" << cv::Mat(T_map2_from_map1.R) << "\n"
               << "t = " << T_map2_from_map1.t << "\n";
     
+    std::vector<cv::Point3f> pts1_unique = 
+        unique_points_by_mpid(kf2pts_1, kf2mp_1, true);
+    std::vector<cv::Point3f> pts2_unique = 
+        unique_points_by_mpid(kf2pts_2, kf2mp_2, true);
+    
+    std::cout << "Unique points: map 1: " << pts1_unique.size()
+              << ", map 2: " << pts2_unique.size() << "\n";
+
+    std::vector<cv::Point3f> pts2_in_map1;
+    pts2_in_map1.reserve(pts2_unique.size());
+    for (const auto& p : pts2_unique) pts2_in_map1.push_back(
+        apply_se3(T_map2_from_map1, p));
+    
+    std::vector<cv::Point3f> merged;
+    merged.reserve(pts1_unique.size() + pts2_in_map1.size());
+    merged.insert(merged.end(), pts1_unique.begin(), pts1_unique.end());
+    merged.insert(merged.end(), pts2_in_map1.begin(), pts2_in_map1.end());
+
+    std::cout << "Full map size: " << merged.size() << std::endl;
+
+    if (!write_points_csv("./Results/merged_mappoints.csv", merged)) {
+        std::cerr << "Failed to write\n";
+    } else {
+        std::cout << "Saved merged map points\n";
+    }
 
     return 0;
 }
