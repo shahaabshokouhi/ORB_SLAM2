@@ -123,14 +123,15 @@ public:
 
     // This part is under contruction to multicam SLAM
     // import into a staging area (no merge)
-    void ImportHighQualityMapPoints(
-        const std::vector<MapPoint*> &vMPs);
+    
     std::vector<MapPoint*> GetHighQualityMapPoints(); 
     std::vector<MapPoint*> PopNewHighQualityMapPoints();
     // once user confirms, merge the staged points into the live map
     // void MergeImportedMapPoints();
     HighQualityManager* mpHQmanager;
     std::thread* mptHQmanager;
+    std::map<std::string, std::vector<MapPoint*>> mImportedPointsByAgent;
+
 
 
 private:
@@ -187,7 +188,6 @@ private:
     std::mutex mMutexState;
 
     // Multicam SLAM
-    std::vector<MapPoint*> mvpImportedMapPoints;
     std::mutex mMutexImport;
     std::mutex mMutexMap;
 

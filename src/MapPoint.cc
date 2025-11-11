@@ -119,6 +119,44 @@ MapPoint::MapPoint(MapPoint& MP)
 
 }
 
+MapPoint::MapPoint(int id,
+                   const cv::Mat &Pos,
+                   const cv::Mat &Normal,
+                   const cv::Mat &Descriptor,
+                   float minDist,
+                   float maxDist,
+                   bool isBad,
+                   const std::vector<int> &observations)
+    : mnId(id),
+      mnFirstKFid(-1),
+      mnFirstFrame(0),
+      nObs(0),
+      mnTrackReferenceForFrame(0),
+      mnLastFrameSeen(0),
+      mbTrackInView(false),
+      mnTrackScaleLevel(-1),
+      mTrackViewCos(0),
+      mbBad(isBad),
+      mpReplaced(nullptr),
+      mnVisible(1),
+      mnFound(1),
+      mfMinDistance(minDist),
+      mfMaxDistance(maxDist),
+      mbHighQaulity(false),
+      mbSentToOther(false),
+      mbReceivedFromOther(true),
+      mpRefKF(nullptr),
+      mpMap(nullptr)
+{
+    Pos.copyTo(mWorldPos);
+    Normal.copyTo(mNormalVector);
+    Descriptor.copyTo(mDescriptor);
+
+    // new field
+    mvnObservations = observations;
+}
+
+
 void MapPoint::SetWorldPos(const cv::Mat &Pos)
 {
     unique_lock<mutex> lock2(mGlobalMutex);

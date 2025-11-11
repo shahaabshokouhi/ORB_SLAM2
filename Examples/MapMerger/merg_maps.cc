@@ -256,7 +256,7 @@ static Pairs3D build_3d_pairs_from_kf(
     auto itP1 = kf2pts_1.find(kf1);
     auto itP2 = kf2pts_2.find(kf2);
     if (itD1==kf2descs_1.end() || itD2==kf2descs_2.end()||
-        itP1==kf2pts_1.end(), itP2==kf2pts_2.end())
+        itP1==kf2pts_1.end() || itP2==kf2pts_2.end())
         return out;
 
     const auto& D1v = itD1->second;
@@ -573,6 +573,14 @@ static bool write_points_csv(const std::string& path,
     return true;
 }
 
+static SE3 invert(const SE3& T)
+{
+    SE3 Ti;
+    Ti.R = T.R.t();
+    Ti.t = -(Ti.R * T.t);
+    return Ti;
+}
+
 int main(int argc, char** argv)
 {
     // parameters
@@ -604,11 +612,6 @@ int main(int argc, char** argv)
     if (!ok1 || !ok2) {
         std::cerr << "Error loading input maps\n";
         return -1;
-    }
-
-    for (auto& kv : kf2descs_1) {
-        std::cout << "KF " << kv.first << " has " << kv.second.size() << " descriptors\n";
-        break;
     }
 
     for (auto& d : kf2descs_1.begin()->second) {
@@ -700,7 +703,16 @@ int main(int argc, char** argv)
             kf2pts_1, kf2pts_2,
             ratio, maxHam);
 
-        if (pairs.P1.size() < 3) continue;
+        if (pairs.P1.size() < 3) {
+            std::cout << "Low number of 3d pairs for KF "
+                      << std::to_string(pr.kf1) << " and "
+                      << std::to_string(pr.kf2) << "\n";
+        } else {
+            // std::cout << "Number of 3d pairs for KF "
+            //           << std::to_string(pr.kf1) << " and "
+            //           << std::to_string(pr.kf2) << ": "
+            //           << pairs.P1.size() << "\n";
+        }
 
         RansacSE3 r = estimate_se3_ransac(
             pairs.P1, pairs.P2, ransac_thresh, ransac_iters, ransac_min_inl, 1234);
@@ -724,7 +736,9 @@ int main(int argc, char** argv)
     }
 
     SE3 T_map2_from_map1 = fuse_transforms_weighted(ests);
-    std::cout << "\nFused transform T_map2 <-- map1:\n"
+    SE3 T_map1_from_map2 = invert(T_map2_from_map1);
+
+    std::cout << "\nFused transform T_map2 -- >map1:\n"
               << "R = \n" << cv::Mat(T_map2_from_map1.R) << "\n"
               << "t = " << T_map2_from_map1.t << "\n";
     
@@ -739,7 +753,7 @@ int main(int argc, char** argv)
     std::vector<cv::Point3f> pts2_in_map1;
     pts2_in_map1.reserve(pts2_unique.size());
     for (const auto& p : pts2_unique) pts2_in_map1.push_back(
-        apply_se3(T_map2_from_map1, p));
+        apply_se3(T_map1_from_map2, p));
     
     std::vector<cv::Point3f> merged;
     merged.reserve(pts1_unique.size() + pts2_in_map1.size());

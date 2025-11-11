@@ -47,6 +47,15 @@ public:
      * For transfer purposes; reuses original ID and does not generate a new one.
      */
     MapPoint(MapPoint& other);
+    // Lightweight constructor for external import (no map or keyframe)
+    MapPoint(int id,
+             const cv::Mat &Pos,
+             const cv::Mat &Normal,
+             const cv::Mat &Descriptor,
+             float minDist = 0.0f,
+             float maxDist = 0.0f,
+             bool isBad = false,
+             const std::vector<int> &observations={});
 
 
     void SetWorldPos(const cv::Mat &Pos);
@@ -130,6 +139,8 @@ public:
     bool mbHighQaulity = false;
     bool mbSentToOther = false;
     bool mbReceivedFromOther = false; 
+    std::vector<int> mvnObservations;
+
 
 protected:    
 

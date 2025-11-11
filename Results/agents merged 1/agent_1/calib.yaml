@@ -1,0 +1,48 @@
+%YAML:1.0
+---
+camera_model: pinhole
+image_width: 640
+image_height: 480
+camera_matrix:
+   - 6.0812872314453125e+02
+   - 0.
+   - 3.2907165527343750e+02
+   - 0.
+   - 6.0808905029296875e+02
+   - 2.4256015014648438e+02
+   - 0.
+   - 0.
+   - 1.
+distortion_coefficients: !!opencv-matrix
+   rows: 1
+   cols: 5
+   dt: d
+   data: [ 0., 0., 0., 0., 0. ]
+depth_image_width: 640
+depth_image_height: 480
+depth_camera_matrix:
+   - 3.8507662963867188e+02
+   - 0.
+   - 3.2116357421875000e+02
+   - 0.
+   - 3.8507662963867188e+02
+   - 2.3452432250976562e+02
+   - 0.
+   - 0.
+   - 1.
+depth_unit: millimeter
+depth_to_color_rotation: !!opencv-matrix
+   rows: 3
+   cols: 3
+   dt: d
+   data: [ 9.9975156784057617e-01, -2.1902412176132202e-02,
+       4.1314223781228065e-03, 2.1915832534432411e-02,
+       9.9975460767745972e-01, -3.2315291464328766e-03,
+       -4.0596304461359978e-03, 3.3212697599083185e-03,
+       9.9998623132705688e-01 ]
+depth_to_color_translation_m: !!opencv-matrix
+   rows: 3
+   cols: 1
+   dt: d
+   data: [ 1.4621024951338768e-02, -3.8156027585500851e-05,
+       9.6406973898410797e-04 ]

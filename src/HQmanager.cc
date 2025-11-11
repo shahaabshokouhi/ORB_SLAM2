@@ -2,23 +2,76 @@
 #include "Map.h"
 #include "MapPoint.h"
 #include "KeyFrame.h"
+#include "Thirdparty/DBoW2/DBoW2/BowVector.h"
+#include "Thirdparty/DBoW2/DBoW2/FeatureVector.h"
 
 #include <thread>
 #include <mutex>
 #include <chrono>
 #include <map>
+#include <set>
 #include <fstream>
 #include <algorithm>
 #include <sstream>
 #include <cmath>
 #include <iomanip>
+#include <unordered_map>
+#include <unordered_set>
+
 
 using namespace std;
 namespace ORB_SLAM2
 {
-    
+
+// internal stuff
+namespace {
+
+struct SE3 {
+    cv::Matx33d R;
+    cv::Vec3d   t;
+};
+
+struct AgentBuckets {
+    std::unordered_map<int, std::vector<cv::Mat>>     kf2descs;
+    std::unordered_map<int, std::vector<cv::Point3f>> kf2pts;
+    std::unordered_map<int, std::vector<int>>         kf2mpids;
+    std::unordered_map<int, DBoW2::BowVector>         kf2bow;
+    bool hasTransform = false;
+    SE3  T_agent_to_local;
+};
+
+struct Candidate { int kf; double score; };
+struct Pair      { int kf1; int kf2; double score; };
+struct Pairs3D {
+    std::vector<cv::Point3f> P1;
+    std::vector<cv::Point3f> P2;
+    std::vector<cv::DMatch>  matches;
+};
+struct RansacSE3 {
+    SE3 model;
+    std::vector<int> inliers;
+    bool ok = false;
+};
+struct EstSE3Weighted { SE3 T; int inliers=0; double score=0.0; };
+struct PairEst { Pair pair; RansacSE3 est; };
+
+std::map<std::string, AgentBuckets> gAgentBuckets;
+std::unordered_map<int, std::vector<Candidate>> matched_frames;
+std::vector<PairEst> pair_ests;
+
+const float ratio = 0.9f;
+const int maxHam = 60;
+const double ransac_thresh = 0.07; // meters
+const int ransac_min_inl = 20;
+const int ransac_iters = 1000;
+
+} 
+
+
+
 HighQualityManager::HighQualityManager(Map* pMap, ORBVocabulary* mpVoc, const std::string& criteria, double period_sec)
 :mpMap(pMap), mpVoc(mpVoc), mCriteria(criteria), mPeriodSec(period_sec){}
+
 
 void HighQualityManager::Run()
 {
@@ -374,6 +427,139 @@ void HighQualityManager::ExportMapPointDescriptorsCSV(const std::string& csv_pat
               << " MapPoints to " << csv_path << "\n";
 }
 
+bool HighQualityManager::ComputeBowForKF(const ORBVocabulary* voc,
+                               const std::vector<cv::Mat>& descs,
+                               DBoW2::BowVector& bow,
+                               DBoW2::FeatureVector* feat)
+{
+    bow.clear();
+    if (feat) feat->clear();
+    if (descs.empty()) return false;
+
+    if (feat) {
+        voc->transform(descs, bow, *feat, 4);
+    } else {
+        voc->transform(descs, bow);
+    }
+
+    return !bow.empty();
+}
+
+void HighQualityManager::ImportHighQualityMapPoints(
+    const std::string &agent_name,
+    const std::vector<MapPoint*> &vMPs)
+{
+    std::unique_lock<std::mutex> lock(mMutexImport);
+
+    // per-agent storage in HQ manager
+    std::vector<MapPoint*> &vAgentPoints = mImportedPointsByAgent[agent_name];
+    // per-agent “buckets” in this .cc
+    AgentBuckets &agentBucket = gAgentBuckets[agent_name];
+
+    std::unordered_set<int> updated_keyframes;
+
+    for (ORB_SLAM2::MapPoint* pSrcMP : vMPs) {
+        if (!pSrcMP) {
+            std::cerr << "[HQManager] skipping null MapPoint from agent " << agent_name << "\n";
+            continue;
+        }
+
+        // 1) check observations list
+        if (pSrcMP->mvnObservations.empty()) {
+            // not fatal, but tell ourselves
+            std::cerr << "[HQManager] MapPoint " << pSrcMP->mnId
+                      << " from agent " << agent_name
+                      << " has no observation KF ids; skipping bucket fill.\n";
+        }
+
+        // 2) get world pos safely
+        cv::Mat X = pSrcMP->GetWorldPos();
+        bool hasPos = (!X.empty() && X.rows >= 3 && X.cols >= 1);
+
+        // 3) get descriptor safely
+        cv::Mat desc = pSrcMP->GetDescriptor();
+        bool hasDesc = (!desc.empty() && desc.rows == 1 && desc.cols == 32 && desc.type() == CV_8U);
+        if (!hasDesc) {
+            std::cerr << "[HQManager] MapPoint " << pSrcMP->mnId
+                      << " from agent " << agent_name
+                      << " has invalid descriptor; rows=" << desc.rows
+                      << " cols=" << desc.cols << " type=" << desc.type() << "\n";
+        }
+
+        // fill agent buckets (only if we have KF ids)
+        for (int kf_id : pSrcMP->mvnObservations) {
+            // descriptor
+            if (hasDesc) {
+                agentBucket.kf2descs[kf_id].push_back(desc.clone());
+            } else {
+                // keep the three vectors aligned: push placeholders or skip all 3
+                // here we'll just skip the whole triplet for this KF
+                continue;
+            }
+
+            // point
+            if (hasPos) {
+                cv::Point3f p;
+                p.x = X.at<float>(0);
+                p.y = X.at<float>(1);
+                p.z = X.at<float>(2);
+                agentBucket.kf2pts[kf_id].push_back(p);
+            } else {
+                // still push dummy to maintain parallel sizes
+                continue;
+            }
+
+            // mp id
+            agentBucket.kf2mpids[kf_id].push_back(static_cast<int>(pSrcMP->mnId));
+
+            // 4) quick consistency check: all 3 vectors for this kf_id must have same size
+            auto &vD = agentBucket.kf2descs[kf_id];
+            auto &vP = agentBucket.kf2pts[kf_id];
+            auto &vM = agentBucket.kf2mpids[kf_id];
+            if (!(vD.size() == vP.size() && vP.size() == vM.size())) {
+                std::cerr << "[HQManager] size mismatch for agent " << agent_name
+                          << " KF " << kf_id
+                          << " descs=" << vD.size()
+                          << " pts="   << vP.size()
+                          << " mpids=" << vM.size()
+                          << "\n";
+            }
+
+            updated_keyframes.insert(kf_id);
+        }
+
+        // finally, keep your old behavior: own a copy of the point
+        ORB_SLAM2::MapPoint* pCopy = new ORB_SLAM2::MapPoint(*pSrcMP);
+        pCopy->ReceivedFromOther(true);
+        vAgentPoints.push_back(pCopy);
+    }
+
+    size_t numKFs = agentBucket.kf2descs.size();
+    size_t totalMPs = 0;
+    for (const auto& kv : agentBucket.kf2mpids) {
+        totalMPs += kv.second.size();
+    }
+
+    // calculating bow vector for updated keyframes
+    for (const auto& kf_id : updated_keyframes) {
+        const auto& descs = agentBucket.kf2descs[kf_id];
+
+        DBoW2::BowVector bow;
+        DBoW2::FeatureVector feat;
+
+        if (ComputeBowForKF(mpVoc, descs, bow, &feat)) {
+            agentBucket.kf2bow.emplace(kf_id, std::move(bow));
+            std::cout << "KF " << kf_id << " BoW vector updated.\n";
+        } else {
+            std::cout << "KF " << kf_id << " produced empty BoW.\n";
+        }
+        
+    }
+    
+    std::cout << "[HQManager] Agent \"" << agent_name << "\" now has "
+              << numKFs << " keyframes and "
+              << totalMPs << " map points accumulated." << std::endl;
+}
 
 
 }

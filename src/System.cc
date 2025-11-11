@@ -92,7 +92,7 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
     mptLocalMapping = new thread(&ORB_SLAM2::LocalMapping::Run, mpLocalMapper);
 
     //Initialize the Loop Closing thread and launch
-    mpLoopCloser = new LoopClosing(mpMap, mpKeyFrameDatabase, mpVocabulary, mSensor!=MONOCULAR, false);
+    mpLoopCloser = new LoopClosing(mpMap, mpKeyFrameDatabase, mpVocabulary, mSensor!=MONOCULAR, true);
     mptLoopClosing = new thread(&ORB_SLAM2::LoopClosing::Run, mpLoopCloser);
 
     mpHQmanager = new HighQualityManager(mpMap, mpVocabulary, "observation", 1.0);
@@ -489,19 +489,6 @@ vector<cv::KeyPoint> System::GetTrackedKeyPointsUn()
 {
     unique_lock<mutex> lock(mMutexState);
     return mTrackedKeyPointsUn;
-}
-
-void System::ImportHighQualityMapPoints(
-    const vector<MapPoint*> &vMPs)
-{
-    // Lock the import buffer
-    std::unique_lock<std::mutex> lock(mMutexImport);
-
-    for (MapPoint* pSrcMP : vMPs){
-        MapPoint* pMPi = new MapPoint(*pSrcMP);
-        // pMPi->SetMap(mpMap);
-        mvpImportedMapPoints.push_back(pMPi);
-    }
 }
 
 std::vector<MapPoint*> System::GetHighQualityMapPoints()

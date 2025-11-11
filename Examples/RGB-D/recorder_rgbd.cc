@@ -117,7 +117,7 @@ int main(int argc, char** argv)
     const std::string out_dir  = argv[1];
     const long max_frames      = (argc>=3)? std::stol(argv[2]) : -1;
     const int fps_limit        = (argc>=4)? std::stoi(argv[3]) : 30;
-    const int save_every = (argc >= 5) ? std::stoi(argv[4]) : 1; // save every N frames
+    const int save_every = (argc >= 5) ? std::stoi(argv[4]) : 3; // save every N frames
     std::signal(SIGINT, sigint_handler);
 
     // Make folders

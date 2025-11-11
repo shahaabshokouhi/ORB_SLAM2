@@ -1,1 +1,1 @@
-./Examples/rgbd_offline Vocabulary/ORBvoc.txt Examples/RGB-D/realsense.yaml ./record_data/agent_1 --realtime
+./Examples/rgbd_offline Vocabulary/ORBvoc.txt Examples/RGB-D/realsense.yaml ./record_data/agent_0 

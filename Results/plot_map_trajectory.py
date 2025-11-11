@@ -112,7 +112,7 @@ def plot_topdown_overlay(map_pts_xyz: np.ndarray,
 
     fig, ax = plt.subplots(figsize=(8, 7))
     ax.scatter(mp_2d[:, 0], mp_2d[:, 1], s=1, alpha=0.7, label="MapPoints")
-    ax.plot(tr_2d[:, 0], tr_2d[:, 1], linewidth=1.5, label="Trajectory")
+    ax.plot(tr_2d[:, 0], tr_2d[:, 1], linewidth=1.5, label="Trajectory", color='red')
 
     ax.set_xlabel("Z (→)   [projected]")
     ax.set_ylabel("−X (↑)  [projected]")
