@@ -549,7 +549,7 @@ void HighQualityManager::ImportHighQualityMapPoints(
 
         if (ComputeBowForKF(mpVoc, descs, bow, &feat)) {
             agentBucket.kf2bow.emplace(kf_id, std::move(bow));
-            std::cout << "KF " << kf_id << " BoW vector updated.\n";
+            std::cout << agent_name << ": KF " << kf_id << " BoW vector updated.\n";
         } else {
             std::cout << "KF " << kf_id << " produced empty BoW.\n";
         }
@@ -559,6 +559,55 @@ void HighQualityManager::ImportHighQualityMapPoints(
     std::cout << "[HQManager] Agent \"" << agent_name << "\" now has "
               << numKFs << " keyframes and "
               << totalMPs << " map points accumulated." << std::endl;
+
+    // number of matched frames
+    int n = 0;
+
+    // ransac parameters
+    const float ratio = 0.9f;
+    const int maxHam = 60;
+    const double ransac_thresh = 0.07; // meters
+    const int ransac_min_inl = 20;
+    const int ransac_iters = 1000;
+
+    std::unordered_map<int, std::vector<Candidate>> matched_frames;
+
+
+    for (auto& ab : gAgentBuckets) {
+        
+        if (ab.first == agent_name) continue;
+        AgentBuckets &agentBucketi = ab.second;
+        
+        for (const auto& kf_a : updated_keyframes) {
+            double best = 0.0;
+            
+            for (const auto& kv : agentBucketi.kf2bow) {
+                int kf_b = kv.first;
+                double sc = mpVoc->score(agentBucket.kf2bow[kf_a], kv.second);
+                if (sc > best) best = sc;
+                matched_frames[kf_a].push_back({kf_b, sc});
+            }
+
+            const double floor_score = 0.03; // empirical floor
+            const double rel_cut = 0.70 * best; // relative to best
+            const double thresh = std::max(floor_score, rel_cut);
+
+            matched_frames[kf_a].erase(std::remove_if(matched_frames[kf_a].begin(), matched_frames[kf_a].end(),
+            [&](const Candidate& c){return c.score < thresh;}),
+            matched_frames[kf_a].end());
+
+            // sort descending
+            std::sort(matched_frames[kf_a].begin(), matched_frames[kf_a].end(),
+                [](const Candidate& a, const Candidate& b){return a.score > b.score;});
+
+            if (!matched_frames[kf_a].empty()){
+                std::cout << "Top KF candidate from agent " << ab.first << " for agent " << agent_name << " KF " << kf_a << ": ";
+                std::cout << "KF " << matched_frames[kf_a][0].kf << " with score " << matched_frames[kf_a][0].score << "\n";
+                ++n;
+            }
+            
+        }
+    }
 }
 
 
