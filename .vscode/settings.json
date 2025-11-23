@@ -69,6 +69,7 @@
         "forward_list": "cpp",
         "regex": "cpp",
         "any": "cpp",
-        "csignal": "cpp"
+        "csignal": "cpp",
+        "shared_mutex": "cpp"
     }
 }

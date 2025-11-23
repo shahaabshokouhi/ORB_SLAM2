@@ -28,7 +28,7 @@ class HighQualityManager
 {
 public:
     HighQualityManager(Map* pMap, ORBVocabulary* mpVoc, 
-        const std::string& criteria, double period_sec);
+        const std::string& criteria, double period_sec, string agentName);
     
     void Run();     
 
@@ -44,6 +44,8 @@ public:
                      const std::vector<cv::Mat>& descs,
                      DBoW2::BowVector& bow,
                      DBoW2::FeatureVector* feat = nullptr);
+
+    std::string msAgentName;
     
 
 private:
