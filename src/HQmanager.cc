@@ -67,7 +67,7 @@ std::vector<PairEst> pair_ests;
 
 const float ratio = 1.0f;
 const int maxHam = 80;
-const double ransac_thresh = 0.15; // meters
+const double ransac_thresh = 0.07; // meters
 const int ransac_min_inl = 3;
 const int ransac_iters = 1000;
 
@@ -1022,13 +1022,6 @@ void HighQualityManager::ImportHighQualityMapPoints(
     // number of matched frames
     int n = 0;
 
-    // ransac parameters
-    const float ratio = 0.9f;
-    const int maxHam = 60;
-    const double ransac_thresh = 0.07; // meters
-    const int ransac_min_inl = 20;
-    const int ransac_iters = 1000;
-
     std::unordered_map<int, std::vector<Candidate>> matched_frames;
     
     if (agent_name != msAgentName) {
@@ -1055,10 +1048,18 @@ void HighQualityManager::ImportHighQualityMapPoints(
                 [](const Candidate& a, const Candidate& b){return a.score > b.score;});
 
             if (!matched_frames[kf_b].empty()){
-                std::cout << "Top KF candidate from agent " << agent_name << " for this agent's KF " << kf_b << ": ";
-                std::cout << "KF " << matched_frames[kf_b][0].kf << " with score " << matched_frames[kf_b][0].score << "\n";
-                ++n;
-                agentBucket.best_pairs[kf_b] = {matched_frames[kf_b][0].kf, matched_frames[kf_b][0].score};
+                Candidate new_best = matched_frames[kf_b][0];
+                if (agentBucket.best_pairs.count(kf_b)) {
+                    if (new_best.score > agentBucket.best_pairs[kf_b].score) {
+                        agentBucket.best_pairs[kf_b] = new_best;
+                        ++n;
+                    }
+                } else {
+                    agentBucket.best_pairs[kf_b] =  new_best;
+                    ++n;
+                }
+                // std::cout << "Top KF candidate from agent " << agent_name << " for this agent's KF " << kf_b << ": ";
+                // std::cout << "KF " << matched_frames[kf_b][0].kf << " with score " << matched_frames[kf_b][0].score << "\n";
             }
         }
 
@@ -1089,10 +1090,17 @@ void HighQualityManager::ImportHighQualityMapPoints(
                         [](const Candidate& a, const Candidate& b){return a.score > b.score;});
 
                     if (!matched_frames[kf_a].empty()){
-                        std::cout << "Top KF candidate from agent " << ka.first << " for this agent's KF " << kf_a << ": ";
-                        std::cout << "KF " << matched_frames[kf_a][0].kf << " with score " << matched_frames[kf_a][0].score << "\n";
-                        ++n;
-                        ka.second.best_pairs[kf_a] = {matched_frames[kf_a][0].kf, matched_frames[kf_a][0].score};
+                        Candidate new_best = matched_frames[kf_a][0];
+                        auto &otherBucket = ka.second;   // alias for clarity
+                        if (otherBucket.best_pairs.count(kf_a)) {
+                            if (new_best.score > otherBucket.best_pairs[kf_a].score) {
+                                otherBucket.best_pairs[kf_a] = new_best;
+                                ++n;
+                            }
+                        } else {
+                            otherBucket.best_pairs[kf_a] = new_best;
+                            ++n;
+                        }                  
                     }
                 }
             }
