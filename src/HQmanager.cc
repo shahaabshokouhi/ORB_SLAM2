@@ -585,6 +585,19 @@ void HighQualityManager::Run()
                     RansacSE3 r = estimate_se3_ransac(
                         pairs.P1, pairs.P2, ransac_thresh, ransac_iters, ransac_min_inl, 1234);
                     
+                    int N = pairs.P1.size();
+                    int inl = (int)r.inliers.size();
+
+                    double inliers_ratio = (N > 0) ? (double)inl / (double)N : 0.0;
+
+                    if (!r.ok || inl < 10 || inliers_ratio < 0.25) {
+                        std::cout << "Pair " << kf_me << " and "
+                                  << kf_other << " rejected!\n"
+                                  << "Inliers ratio: " << inliers_ratio << "\n"
+                                  << "inliers: " << inl << "\n";
+                        continue;
+                    }
+
                     if (r.ok) {
                         std::cout << "KF " << kf_me << " and KF " << kf_other
                                   << ": inliers = " << r.inliers.size()
@@ -1023,89 +1036,141 @@ void HighQualityManager::ImportHighQualityMapPoints(
     int n = 0;
 
     std::unordered_map<int, std::vector<Candidate>> matched_frames;
-    
-    if (agent_name != msAgentName) {
-        for (const auto& kv : gAgentBuckets[msAgentName].kf2bow) {
-            double best = 0.0;
-            int kf_b = kv.first;
 
-            for (const auto& kf_a : updated_keyframes) {
-                double sc = mpVoc->score(kv.second, gAgentBuckets[agent_name].kf2bow[kf_a]);
-                if (sc > best) best = sc;
-                matched_frames[kf_b].push_back({kf_a, sc});
+    // Stronger BoW thresholds
+    const double bow_floor_score = 0.08;  // was 0.03, too permissive
+    const double bow_rel_cut    = 0.70;
+
+    if (agent_name != msAgentName)
+    {
+        // We received new KFs from 'agent_name'
+        AgentBuckets &otherBucket = agentBucket;               // this is gAgentBuckets[agent_name]
+        AgentBuckets &meBucket    = gAgentBuckets[msAgentName];
+
+        for (const auto &kv_me : meBucket.kf2bow) {
+            int kf_me = kv_me.first;
+            const auto &bow_me = kv_me.second;
+
+            double best_score = 0.0;
+            auto &cands = matched_frames[kf_me];
+            cands.clear();
+
+            // compare this agent's kf_me with each NEW keyframe from 'agent_name'
+            for (int kf_other : updated_keyframes) {
+                auto itBowOther = otherBucket.kf2bow.find(kf_other);
+                if (itBowOther == otherBucket.kf2bow.end()) continue;
+
+                double sc = mpVoc->score(bow_me, itBowOther->second);
+                cands.push_back({kf_other, sc});
+                if (sc > best_score) best_score = sc;
             }
 
-            const double floor_score = 0.03; // empirical floor
-            const double rel_cut = 0.70 * best; // relative to best
-            const double thresh = std::max(floor_score, rel_cut);
+            if (cands.empty()) continue;
 
-            matched_frames[kf_b].erase(std::remove_if(matched_frames[kf_b].begin(), matched_frames[kf_b].end(),
-            [&](const Candidate& c){return c.score < thresh;}),
-            matched_frames[kf_b].end());
+            const double thresh = std::max(bow_floor_score, bow_rel_cut * best_score);
 
-            // sort descending
-            std::sort(matched_frames[kf_b].begin(), matched_frames[kf_b].end(),
-                [](const Candidate& a, const Candidate& b){return a.score > b.score;});
+            // keep only strong candidates
+            cands.erase(std::remove_if(cands.begin(), cands.end(),
+                                       [&](const Candidate &c) {
+                                           return c.score < thresh;
+                                       }),
+                        cands.end());
 
-            if (!matched_frames[kf_b].empty()){
-                Candidate new_best = matched_frames[kf_b][0];
-                if (agentBucket.best_pairs.count(kf_b)) {
-                    if (new_best.score > agentBucket.best_pairs[kf_b].score) {
-                        agentBucket.best_pairs[kf_b] = new_best;
-                        ++n;
-                    }
-                } else {
-                    agentBucket.best_pairs[kf_b] =  new_best;
-                    ++n;
-                }
-                // std::cout << "Top KF candidate from agent " << agent_name << " for this agent's KF " << kf_b << ": ";
-                // std::cout << "KF " << matched_frames[kf_b][0].kf << " with score " << matched_frames[kf_b][0].score << "\n";
+            if (cands.empty()) continue;
+
+            // sort descending by score
+            std::sort(cands.begin(), cands.end(),
+                      [](const Candidate &a, const Candidate &b) {
+                          return a.score > b.score;
+                      });
+
+            const Candidate new_best = cands.front();
+
+            // update only if this is better than the previous stored match
+            auto itPrev = otherBucket.best_pairs.find(kf_me);
+            if (itPrev == otherBucket.best_pairs.end() ||
+                new_best.score > itPrev->second.score)
+            {
+                otherBucket.best_pairs[kf_me] = new_best;
+                ++n;
+                // optional debug:
+                // std::cout << "[BoW MATCH] this KF " << kf_me
+                //           << " best with agent " << agent_name
+                //           << " KF " << new_best.kf
+                //           << " score=" << new_best.score << "\n";
             }
         }
+    }
+    else
+    {
+        // We just added new KFs for *this* agent; compare them to all other agents
+        AgentBuckets &meBucket = gAgentBuckets[msAgentName];
 
-    } else {
-        for (auto& ka : gAgentBuckets) {
+        for (auto &ka : gAgentBuckets) {
+            const std::string &other_name = ka.first;
+            if (other_name == msAgentName) continue;
 
-            if (ka.first == msAgentName) continue;
+            AgentBuckets &otherBucket = ka.second;
 
-            for (const auto& kv : ka.second.kf2bow) {
-                double best = 0.0;
-                int kf_b = kv.first;
+            // fresh map per other agent
+            matched_frames.clear();
 
-                for (const auto& kf_a : updated_keyframes) {
-                    double sc = mpVoc->score(kv.second, gAgentBuckets[msAgentName].kf2bow[kf_a]);
-                    if (sc > best) best = sc;
-                    matched_frames[kf_a].push_back({kf_b, sc});
+            for (int kf_me : updated_keyframes) {
+                auto itBowMe = meBucket.kf2bow.find(kf_me);
+                if (itBowMe == meBucket.kf2bow.end()) continue;
 
-                    const double floor_score = 0.03; // empirical floor
-                    const double rel_cut = 0.70 * best; // relative to best
-                    const double thresh = std::max(floor_score, rel_cut);
+                const auto &bow_me = itBowMe->second;
+                double best_score = 0.0;
+                auto &cands = matched_frames[kf_me];
+                cands.clear();
 
-                    matched_frames[kf_a].erase(std::remove_if(matched_frames[kf_a].begin(), matched_frames[kf_a].end(),
-                    [&](const Candidate& c){return c.score < thresh;}),
-                    matched_frames[kf_a].end());
+                // compare this new KF with all KFs of the other agent
+                for (const auto &kv_other : otherBucket.kf2bow) {
+                    int kf_other = kv_other.first;
+                    const auto &bow_other = kv_other.second;
 
-                    // sort descending
-                    std::sort(matched_frames[kf_a].begin(), matched_frames[kf_a].end(),
-                        [](const Candidate& a, const Candidate& b){return a.score > b.score;});
+                    double sc = mpVoc->score(bow_me, bow_other);
+                    cands.push_back({kf_other, sc});
+                    if (sc > best_score) best_score = sc;
+                }
 
-                    if (!matched_frames[kf_a].empty()){
-                        Candidate new_best = matched_frames[kf_a][0];
-                        auto &otherBucket = ka.second;   // alias for clarity
-                        if (otherBucket.best_pairs.count(kf_a)) {
-                            if (new_best.score > otherBucket.best_pairs[kf_a].score) {
-                                otherBucket.best_pairs[kf_a] = new_best;
-                                ++n;
-                            }
-                        } else {
-                            otherBucket.best_pairs[kf_a] = new_best;
-                            ++n;
-                        }                  
-                    }
+                if (cands.empty()) continue;
+
+                const double thresh = std::max(bow_floor_score, bow_rel_cut * best_score);
+
+                // keep only strong candidates
+                cands.erase(std::remove_if(cands.begin(), cands.end(),
+                                           [&](const Candidate &c) {
+                                               return c.score < thresh;
+                                           }),
+                            cands.end());
+
+                if (cands.empty()) continue;
+
+                std::sort(cands.begin(), cands.end(),
+                          [](const Candidate &a, const Candidate &b) {
+                              return a.score > b.score;
+                          });
+
+                const Candidate new_best = cands.front();
+
+                // key in best_pairs is ALWAYS "this agent's KF"
+                auto itPrev = otherBucket.best_pairs.find(kf_me);
+                if (itPrev == otherBucket.best_pairs.end() ||
+                    new_best.score > itPrev->second.score)
+                {
+                    otherBucket.best_pairs[kf_me] = new_best;
+                    ++n;
+                    // optional debug:
+                    // std::cout << "[BoW MATCH] this KF " << kf_me
+                    //           << " best with agent " << other_name
+                    //           << " KF " << new_best.kf
+                    //           << " score=" << new_best.score << "\n";
                 }
             }
         }
     }
+
     
 
 
