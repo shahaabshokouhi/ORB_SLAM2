@@ -65,11 +65,18 @@ std::mutex gBucketsMx;
 std::unordered_map<int, std::vector<Candidate>> matched_frames;
 std::vector<PairEst> pair_ests;
 
+// matching parameters
 const float ratio = 1.0f;
 const int maxHam = 80;
-const double ransac_thresh = 0.07; // meters
-const int ransac_min_inl = 3;
-const int ransac_iters = 1000;
+
+// RANSAC + fusion thresholds
+const double kRansacThresh       = 0.07;   // same as before (meters)
+const int    kRansacIters        = 1000;
+const int    kRansacMinInliers   = 5;      // minimal to even consider an SE3
+const int    kMinPointsPerPair   = 15;     // ignore small matches (N < this)
+const double kMinInlierRatio     = 0.20;   // inliers / N
+const int    kMinPairsForFusion  = 3;      // need at least this many KFs to fuse
+
 
 } 
 
@@ -527,103 +534,122 @@ void HighQualityManager::Run()
 
         {
             std::unique_lock<std::mutex> glock(gBucketsMx);
-            auto& meAgentBucket = gAgentBuckets[msAgentName];
-            for (auto& ka : gAgentBuckets){
-                if (ka.first == msAgentName) continue;
-                auto& otherAgentBucket = ka.second;
-                if (otherAgentBucket.best_pairs.size() > 0) {
-                    std::cout << msAgentName << " has " << otherAgentBucket.best_pairs.size()
-                              << " match(es) with agent " << ka.first << "!\n";                
-                } else {
+
+            AgentBuckets &meBucket = gAgentBuckets[msAgentName];
+
+            for (auto &ka : gAgentBuckets) {
+                const std::string &otherName = ka.first;
+                if (otherName == msAgentName) continue;
+
+                AgentBuckets &otherBucket = ka.second;
+
+                // need some KF matches first
+                if (otherBucket.best_pairs.size() < (size_t)kMinPairsForFusion) {
+                    // std::cout << "[SE3] Skipping agent " << otherName
+                    //           << ": only " << otherBucket.best_pairs.size()
+                    //           << " KF matches.\n";
                     continue;
                 }
 
                 std::vector<PairEst> pair_ests;
-                pair_ests.reserve(otherAgentBucket.best_pairs.size());
+                pair_ests.reserve(otherBucket.best_pairs.size());
 
-                for (const auto& kb : otherAgentBucket.best_pairs) {
-                    int kf_me = kb.first;
-                    int kf_other = kb.second.kf;
-                    auto itD_me    = meAgentBucket.kf2descs.find(kb.first);
-                    auto itD_other = otherAgentBucket.kf2descs.find(kb.second.kf);
-                    auto itP_me    = meAgentBucket.kf2pts.find(kb.first);
-                    auto itP_other = otherAgentBucket.kf2pts.find(kb.second.kf);
+                for (const auto &kb : otherBucket.best_pairs) {
+                    int kf_me    = kb.first;        // this agent's KF id
+                    int kf_other = kb.second.kf;    // other agent's KF id
 
-                    int nD_me    = (itD_me    != meAgentBucket.kf2descs.end()) ? itD_me->second.size()    : 0;
-                    int nD_other = (itD_other != otherAgentBucket.kf2descs.end()) ? itD_other->second.size() : 0;
-                    int nP_me    = (itP_me    != meAgentBucket.kf2pts.end()) ? itP_me->second.size()    : 0;
-                    int nP_other = (itP_other != otherAgentBucket.kf2pts.end()) ? itP_other->second.size() : 0;
-
-                    // std::cout << "[KF STATS] me=" << msAgentName 
-                    //         << " KF_me=" << kb.first 
-                    //         << " descs=" << nD_me << " pts=" << nP_me
-                    //         << " | other=" << ka.first 
-                    //         << " KF_other=" << kb.second.kf
-                    //         << " descs=" << nD_other << " pts=" << nP_other
-                    //         << "\n";
+                    // build 3D correspondences from those two KFs
                     Pairs3D pairs = build_3d_pairs_from_kf(
                         kf_me, kf_other,
-                        meAgentBucket.kf2descs,
-                        otherAgentBucket.kf2descs,
-                        meAgentBucket.kf2pts,
-                        otherAgentBucket.kf2pts,
+                        meBucket.kf2descs,
+                        otherBucket.kf2descs,
+                        meBucket.kf2pts,
+                        otherBucket.kf2pts,
                         ratio, maxHam
                     );
 
-                    if (pairs.P1.size() < 3) {
-                        // std::cout << "Low number of 3d pairs for KF "
-                        //           << std::to_string(kf_me) << " and "
-                        //           << std::to_string(kf_other) << "\n";
+                    const int N = (int)pairs.P1.size();
+                    if (N < kMinPointsPerPair) {
+                        // std::cout << "[SE3] Pair " << kf_me << " - " << kf_other
+                        //           << " rejected: N=" << N << " < " << kMinPointsPerPair << "\n";
                         continue;
                     }
-
-                    std::cout << "[PAIR] KF_me=" << kf_me 
-                              << " KF_other=" << kf_other 
-                              << " |P1|=" << pairs.P1.size() 
-                              << " |P2|=" << pairs.P2.size() << "\n";
 
                     RansacSE3 r = estimate_se3_ransac(
-                        pairs.P1, pairs.P2, ransac_thresh, ransac_iters, ransac_min_inl, 1234);
-                    
-                    int N = pairs.P1.size();
-                    int inl = (int)r.inliers.size();
+                        pairs.P1,
+                        pairs.P2,
+                        kRansacThresh,
+                        kRansacIters,
+                        kRansacMinInliers,
+                        1234
+                    );
 
-                    double inliers_ratio = (N > 0) ? (double)inl / (double)N : 0.0;
-
-                    if (!r.ok || inl < 10 || inliers_ratio < 0.25) {
-                        std::cout << "Pair " << kf_me << " and "
-                                  << kf_other << " rejected!\n"
-                                  << "Inliers ratio: " << inliers_ratio << "\n"
-                                  << "inliers: " << inl << "\n";
+                    if (!r.ok) {
+                        // std::cout << "[SE3] Pair " << kf_me << " - " << kf_other
+                        //           << " RANSAC failed.\n";
                         continue;
                     }
 
-                    if (r.ok) {
-                        std::cout << "KF " << kf_me << " and KF " << kf_other
-                                  << ": inliers = " << r.inliers.size()
-                                  << " of " << pairs.P1.size() << "\n";
-                        pair_ests.push_back({kf_me, kf_other, r});
+                    const int inl = (int)r.inliers.size();
+                    const double ratio_inl = (N > 0) ? (double)inl / (double)N : 0.0;
+
+                    if (inl < kRansacMinInliers || ratio_inl < kMinInlierRatio) {
+                        // std::cout << "[SE3] Pair " << kf_me << " - " << kf_other
+                        //           << " rejected: inliers=" << inl
+                        //           << " N=" << N
+                        //           << " ratio=" << ratio_inl << "\n";
+                        continue;
                     }
-                    
+
+                    std::cout << "KF " << kf_me << " and KF " << kf_other
+                            << ": inliers = " << inl
+                            << " of " << N
+                            << " (ratio=" << ratio_inl << ")\n";
+
+                    pair_ests.push_back({kf_me, kf_other, r});
                 }
 
+                if (pair_ests.size() < (size_t)kMinPairsForFusion) {
+                    // not enough robust SE3s to trust a fused transform
+                    // std::cout << "[SE3] Agent " << otherName
+                    //           << " has only " << pair_ests.size()
+                    //           << " good pairs; skipping fusion.\n";
+                    continue;
+                }
+
+                // Build weighted list for fusion (weight = #inliers)
                 std::vector<EstSE3Weighted> ests;
                 ests.reserve(pair_ests.size());
-                for (const auto& pe : pair_ests) {
+                for (const auto &pe : pair_ests) {
                     EstSE3Weighted e;
-                    e.T = pe.est.model;
-                    e.inliers = (int)pe.est.inliers.size();
+                    e.T        = pe.est.model;
+                    e.inliers  = (int)pe.est.inliers.size();
                     ests.push_back(e);
                 }
 
-                SE3 T_map2_from_map1 = fuse_transforms_weighted(ests);
-                SE3 T_map1_from_map2 = invert(T_map2_from_map1);
+                // Fuse SE3s: T_other_from_me: p_other ≈ R * p_me + t
+                SE3 T_other_from_me = fuse_transforms_weighted(ests);
+                // We want transform from other agent -> this agent
+                SE3 T_me_from_other = invert(T_other_from_me);
 
-                otherAgentBucket.T_agent_to_local = T_map1_from_map2;
+                otherBucket.T_agent_to_local = T_me_from_other;
+                otherBucket.hasTransform     = true;
 
-                std::cout << "\nFused transform " << ka.first << " -- > this agent (" << msAgentName << "):\n"
-                          << "R = \n" << cv::Mat(T_map1_from_map2.R) << "\n"
-                          << "t = " << T_map1_from_map2.t << "\n";
+                // Debug: print Euler angles (in degrees) for sanity
+                const cv::Matx33d &R = T_me_from_other.R;
+                double yaw   = std::atan2(R(1,0), R(0,0));
+                double pitch = std::asin(-R(2,0));
+                double roll  = std::atan2(R(2,1), R(2,2));
+
+                auto rad2deg = [](double r){ return r * 180.0 / M_PI; };
+
+                std::cout << "\nFused transform " << otherName
+                        << " --> " << msAgentName << ":\n"
+                        << "R = \n" << cv::Mat(T_me_from_other.R) << "\n"
+                        << "t = " << T_me_from_other.t << "\n"
+                        << "angles (deg): roll="  << rad2deg(roll)
+                        << " pitch=" << rad2deg(pitch)
+                        << " yaw="   << rad2deg(yaw) << "\n\n";
             }
         }
     }
@@ -938,7 +964,7 @@ void HighQualityManager::ImportHighQualityMapPoints(
     
     std::unique_lock<std::mutex> glock(gBucketsMx);
     // per-agent storage in HQ manager
-    std::vector<MapPoint*> &vAgentPoints = mImportedPointsByAgent[agent_name];
+    // std::vector<MapPoint*> &vAgentPoints = mImportedPointsByAgent[agent_name];
     // per-agent “buckets” in this .cc
     AgentBuckets &agentBucket = gAgentBuckets[agent_name];
 
@@ -973,35 +999,46 @@ void HighQualityManager::ImportHighQualityMapPoints(
         }
 
         // fill agent buckets (only if we have KF ids)
+        int mpid = static_cast<int>(pSrcMP->mnId);
+
         for (int kf_id : pSrcMP->mvnObservations) {
-            // descriptor
-            if (hasDesc) {
-                agentBucket.kf2descs[kf_id].push_back(desc.clone());
-            } else {
-                // keep the three vectors aligned: push placeholders or skip all 3
-                // here we'll just skip the whole triplet for this KF
+
+            // we only insert if descriptor is valid; otherwise skip this MP for this KF
+            if (!hasDesc || !hasPos) {
                 continue;
             }
 
-            // point
-            if (hasPos) {
-                cv::Point3f p;
-                p.x = X.at<float>(0);
-                p.y = X.at<float>(1);
-                p.z = X.at<float>(2);
-                agentBucket.kf2pts[kf_id].push_back(p);
-            } else {
-                // still push dummy to maintain parallel sizes
-                continue;
-            }
-
-            // mp id
-            agentBucket.kf2mpids[kf_id].push_back(static_cast<int>(pSrcMP->mnId));
-
-            // 4) quick consistency check: all 3 vectors for this kf_id must have same size
             auto &vD = agentBucket.kf2descs[kf_id];
             auto &vP = agentBucket.kf2pts[kf_id];
             auto &vM = agentBucket.kf2mpids[kf_id];
+
+            // try to find existing entry with same mpid
+            int existing_idx = -1;
+            for (size_t i = 0; i < vM.size(); ++i) {
+                if (vM[i] == mpid) {
+                    existing_idx = static_cast<int>(i);
+                    break;
+                }
+            }
+
+            cv::Point3f p;
+            p.x = X.at<float>(0);
+            p.y = X.at<float>(1);
+            p.z = X.at<float>(2);
+
+            if (existing_idx >= 0) {
+                // REPLACE in-place
+                desc.clone().copyTo(vD[existing_idx]);
+                vP[existing_idx] = p;
+                // vM[existing_idx] already equals mpid
+            } else {
+                // NEW entry
+                vD.push_back(desc.clone());
+                vP.push_back(p);
+                vM.push_back(mpid);
+            }
+
+            // 4) quick consistency check: all 3 vectors for this kf_id must have same size
             if (!(vD.size() == vP.size() && vP.size() == vM.size())) {
                 std::cerr << "[HQManager] size mismatch for agent " << agent_name
                         << " KF " << kf_id
@@ -1014,10 +1051,11 @@ void HighQualityManager::ImportHighQualityMapPoints(
             updated_keyframes.insert(kf_id);
         }
 
+
         // finally, keep your old behavior: own a copy of the point
-        ORB_SLAM2::MapPoint* pCopy = new ORB_SLAM2::MapPoint(*pSrcMP);
-        pCopy->ReceivedFromOther(true);
-        vAgentPoints.push_back(pCopy);
+        // ORB_SLAM2::MapPoint* pCopy = new ORB_SLAM2::MapPoint(*pSrcMP);
+        // pCopy->ReceivedFromOther(true);
+        // vAgentPoints.push_back(pCopy);
     }
 
     // calculating bow vector for updated keyframes
@@ -1038,7 +1076,7 @@ void HighQualityManager::ImportHighQualityMapPoints(
     std::unordered_map<int, std::vector<Candidate>> matched_frames;
 
     // Stronger BoW thresholds
-    const double bow_floor_score = 0.08;  // was 0.03, too permissive
+    const double bow_floor_score = 0.04;  // was 0.03, too permissive
     const double bow_rel_cut    = 0.70;
 
     if (agent_name != msAgentName)
@@ -1170,11 +1208,6 @@ void HighQualityManager::ImportHighQualityMapPoints(
             }
         }
     }
-
-    
-
-
-    
 }
 
 

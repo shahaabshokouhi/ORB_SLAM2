@@ -161,6 +161,7 @@ void MapPoint::SetWorldPos(const cv::Mat &Pos)
 {
     unique_lock<mutex> lock2(mGlobalMutex);
     unique_lock<mutex> lock(mMutexPos);
+    mbQueuedForHq = false;
     Pos.copyTo(mWorldPos);
 }
 
@@ -185,9 +186,11 @@ KeyFrame* MapPoint::GetReferenceKeyFrame()
 void MapPoint::AddObservation(KeyFrame* pKF, size_t idx)
 {
     unique_lock<mutex> lock(mMutexFeatures);
+    mbQueuedForHq = false;
     if(mObservations.count(pKF))
         return;
     mObservations[pKF]=idx;
+    mbQueuedForHq = false;
 
     if(pKF->mvuRight[idx]>=0)
         nObs+=2;
@@ -210,6 +213,7 @@ void MapPoint::EraseObservation(KeyFrame* pKF)
                 nObs--;
 
             mObservations.erase(pKF);
+            mbQueuedForHq = false;
 
             if(mpRefKF==pKF)
                 mpRefKF=mObservations.begin()->first;
@@ -391,6 +395,7 @@ void MapPoint::ComputeDistinctiveDescriptors()
     {
         unique_lock<mutex> lock(mMutexFeatures);
         mDescriptor = vDescriptors[BestIdx].clone();
+        mbQueuedForHq = false;
     }
 }
 

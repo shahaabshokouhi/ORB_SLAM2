@@ -140,8 +140,12 @@ void Map::clear()
 void Map::AddHighQualityMapPoints(MapPoint* pMP) 
 {
     unique_lock<mutex> lock(mMutexMap);
-    if (mspHighQualityMapPoints.insert(pMP).second) {
+
+    mspHighQualityMapPoints.insert(pMP);
+
+    if (!pMP->mbQueuedForHq) {
         mQueueNewHighQualityMapPoints.push_back(pMP);
+        pMP->mbQueuedForHq = true;
     }
 }
 
@@ -174,12 +178,14 @@ vector<MapPoint*> Map::PopNewHighQualityMapPoints()
     unique_lock<mutex> lock(mMutexMap);
     std::vector<MapPoint*> out;
 
-    out.reserve(mQueueNewHighQualityMapPoints.size());
+    out.reserve(50);
     int sentCount = 0;
     while(!mQueueNewHighQualityMapPoints.empty() && sentCount < 50)
     {
-        out.push_back(mQueueNewHighQualityMapPoints.front());
+        MapPoint* pMP = mQueueNewHighQualityMapPoints.front();
         mQueueNewHighQualityMapPoints.pop_front();
+        
+        out.push_back(pMP);
         sentCount++;
     }
     return out;

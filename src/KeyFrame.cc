@@ -682,7 +682,7 @@ void KeyFrame::AddHighQualityMapPoint(MapPoint* pMP, const size_t idx)
 
     // only change if different
     if (prevPtr == pMP) {
-        std::cout << "no-op: same HQ map point being set again" << std::endl;
+        // std::cout << "no-op: same HQ map point being set again" << std::endl;
         return; // no-op; don't mark dirty/flag
     }
 

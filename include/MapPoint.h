@@ -138,7 +138,8 @@ public:
     // stuff for multi-agent SLAM
     bool mbHighQaulity = false;
     bool mbSentToOther = false;
-    bool mbReceivedFromOther = false; 
+    bool mbReceivedFromOther = false;
+    bool mbQueuedForHq = false; 
     std::vector<int> mvnObservations;
 
 
