@@ -66,16 +66,16 @@ std::unordered_map<int, std::vector<Candidate>> matched_frames;
 std::vector<PairEst> pair_ests;
 
 // matching parameters
-const float ratio = 1.0f;
-const int maxHam = 80;
+const float ratio = 0.8f;
+const int maxHam = 60;
 
 // RANSAC + fusion thresholds
-const double kRansacThresh       = 0.07;   // same as before (meters)
-const int    kRansacIters        = 1000;
+const double kRansacThresh       = 0.10;   // same as before (meters)
+const int    kRansacIters        = 2000;
 const int    kRansacMinInliers   = 5;      // minimal to even consider an SE3
 const int    kMinPointsPerPair   = 10;     // ignore small matches (N < this)
-const double kMinInlierRatio     = 0.20;   // inliers / N
-const int    kMinPairsForFusion  = 3;      // need at least this many KFs to fuse
+const double kMinInlierRatio     = 0.15;   // inliers / N
+const int    kMinPairsForFusion  = 1;      // need at least this many KFs to fuse
 
 
 } 
