@@ -66,15 +66,15 @@ std::unordered_map<int, std::vector<Candidate>> matched_frames;
 std::vector<PairEst> pair_ests;
 
 // matching parameters
-const float ratio = 0.8f;
-const int maxHam = 60;
+const float ratio = 0.9f;
+const int maxHam = 80;
 
 // RANSAC + fusion thresholds
 const double kRansacThresh       = 0.10;   // same as before (meters)
 const int    kRansacIters        = 2000;
 const int    kRansacMinInliers   = 5;      // minimal to even consider an SE3
-const int    kMinPointsPerPair   = 10;     // ignore small matches (N < this)
-const double kMinInlierRatio     = 0.15;   // inliers / N
+const int    kMinPointsPerPair   = 5;     // ignore small matches (N < this)
+const double kMinInlierRatio     = 0.4;   // inliers / N
 const int    kMinPairsForFusion  = 1;      // need at least this many KFs to fuse
 
 
@@ -429,12 +429,19 @@ static Pairs3D build_3d_pairs_from_kf(
     std::vector<cv::DMatch> good;
     good.reserve(knn.size());
     for(auto& v : knn) {
-        if (!v.empty()) ++raw_matches;
-        if (v.size()<2) continue;
-        const auto& m1 = v[0];
-        const auto& m2 = v[1];
-        if (m1.distance <= maxHamming && m1.distance <= ratio*m2.distance) {
-            good.push_back(m1);
+        if (v.empty()) continue;
+        ++raw_matches;
+        if (v.size() == 1){
+            const auto &m1 = v[0];
+            if (m1.distance <= maxHamming) {
+                good.push_back(m1);
+                std::cout << "found a single match"
+            }
+        } else {
+            const auto& m1 = v[0];
+            const auto& m2 = v[1];
+            if (m1.distance <= maxHamming && m1.distance <= ratio*m2.distance) {
+                good.push_back(m1);
         }
     }
 
@@ -1105,7 +1112,7 @@ void HighQualityManager::ImportHighQualityMapPoints(
     std::unordered_map<int, std::vector<Candidate>> matched_frames;
 
     // Stronger BoW thresholds
-    const double bow_floor_score = 0.03;  // was 0.03, too permissive
+    const double bow_floor_score = 0.04;  // was 0.03, too permissive
     const double bow_rel_cut    = 0.70;
 
     if (agent_name != msAgentName)
