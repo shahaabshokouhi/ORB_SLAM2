@@ -657,7 +657,7 @@ void Frame::ComputeStereoFromRGBD(const cv::Mat &imDepth)
 
         const float d = imDepth.at<float>(v,u);
 
-        if(d>0)
+        if(d>0 && d<2.0)
         {
             mvDepth[i] = d;
             mvuRight[i] = kpU.pt.x-mbf/d;

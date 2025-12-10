@@ -435,13 +435,14 @@ static Pairs3D build_3d_pairs_from_kf(
             const auto &m1 = v[0];
             if (m1.distance <= maxHamming) {
                 good.push_back(m1);
-                std::cout << "found a single match"
+                std::cout << "found a single match" << std::endl;
             }
         } else {
             const auto& m1 = v[0];
             const auto& m2 = v[1];
             if (m1.distance <= maxHamming && m1.distance <= ratio*m2.distance) {
                 good.push_back(m1);
+            }
         }
     }
 
@@ -494,7 +495,7 @@ void HighQualityManager::Run()
         // ----------------------------
         // Thresholds (tune here)
         // ----------------------------
-        const int   kMinObs                = 6;      // baseline
+        const int   kMinObs                = 0;      // baseline
         const float kMinFoundRatio         = 0.90f;  // 0.25..0.5 typical
         const int   kMaxScaleLevelDiff     = 1;      // |oct - pred| <= 1
         const float kMinViewCos            = 0.70f;  // cos(60 deg)
