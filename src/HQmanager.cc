@@ -138,6 +138,18 @@ static bool umeyama_rigid(const std::vector<cv::Point3f>& P,
     return true;
 }
 
+static inline bool non_degenerate_3pt(const cv::Point3f& a,
+                                      const cv::Point3f& b,
+                                      const cv::Point3f& c,
+                                      double eps = 1e-8)
+{
+    // triangle area ~ |(b-a) x (c-a)|; if near zero => collinear/degenerate
+    cv::Vec3d ab(b.x - a.x, b.y - a.y, b.z - a.z);
+    cv::Vec3d ac(c.x - a.x, c.y - a.y, c.z - a.z);
+    cv::Vec3d cr = ab.cross(ac);
+    return (cr.dot(cr) > eps);   // squared magnitude
+}
+
 static RansacSE3 estimate_se3_ransac(
     const std::vector<cv::Point3f>& P1,
     const std::vector<cv::Point3f>& P2,
@@ -149,29 +161,50 @@ static RansacSE3 estimate_se3_ransac(
     RansacSE3 out;
     const int N = (int)P1.size();
     if (N < 3 || (int)P2.size() != N) {
-        // std::cout << "[RANSAC] early exit: N=" << N 
-        //           << " P2.size=" << P2.size() << "\n";
+        std::cout << "[RANSAC] early exit: N=" << N 
+                  << " P2.size=" << P2.size() << "\n";
         return out;
     }
 
     std::mt19937 rng(seed);
     std::uniform_int_distribution<int> uni(0, N-1); 
 
+    const int sample_k = (N >= 4) ? 4 : 3;
+    std::vector<int> idx(sample_k);
+
     int best_inl = -1;
     SE3 best_T;
     std::vector<int> best_set;
 
-    std::vector<int> idx(3);
+    const int early_good = std::max(minInliers, (int)(0.7*N));
 
-    for (int it=0; it<maxIters; ++it) {
-        // sample 3 distinct indices
+    for (int it = 0; it < maxIters; ++it) {
+        // sample 3 distinct indices        
         for (;;) {
-            idx[0]=uni(rng); idx[1]=uni(rng); idx[2]=uni(rng);
-            if (idx[0]!=idx[1] && idx[0]!=idx[2] && idx[1]!=idx[2]) break;
+            for(int k = 0; k < sample_k; ++k) idx[k] = uni(rng);
+
+            bool distinct = true;
+            for (int a = 0; a < sample_k && distinct; ++a) {
+                for (int b = a + 1; b < sample_k; ++b) {
+                    if (idx[a] == idx[b]) {
+                        distinct = false;
+                        break;
+                    }
+                }
+            }
+            if (distinct) break;
         }
 
-        std::vector<cv::Point3f> sP(3), sQ(3);
-        for (int k=0; k<3; ++k) {sP[k]=P1[idx[k]]; sQ[k]=P2[idx[k]];}
+
+        std::vector<cv::Point3f> sP(sample_k), sQ(sample_k);
+        for (int k=0; k<sample_k; ++k) {sP[k]=P1[idx[k]]; sQ[k]=P2[idx[k]];}
+        
+        // deneeracy check
+        if (!non_degenerate_3pt(sP[0], sP[1], sP[2]) ||
+            !non_degenerate_3pt(sQ[0], sQ[1], sQ[2]))
+        {
+            continue;
+        }
 
         SE3 Tm;
         if (!umeyama_rigid(sP, sQ, Tm)) continue;
@@ -190,7 +223,9 @@ static RansacSE3 estimate_se3_ransac(
         if ((int)inl.size() > best_inl) {
             best_inl = (int)inl.size();
             best_T = Tm;
-            best_set = std::move(inl);
+            best_set = inl;
+
+            if (best_inl >= early_good) break;
         }
     }
 
@@ -546,15 +581,27 @@ void HighQualityManager::Run()
             bucketsCopy = gAgentBuckets;
         }
 
+        // thresholds for the pooled refinement
+        const int kMinMatchedFramesForPool = 3;
+        const int kMinPoolSizeForRansac    = 100;
+
+        auto make_seed = [&](int a, int b, unsigned base=1337u){
+            // stable-ish seed per pair
+            return base ^ (unsigned)(a * 73856093) ^ (unsigned)(b * 19349663);
+        };
+
+        auto rad2deg = [](double r){ return r * 180.0 / M_PI; };
+
         // Make sure we actually have our own agent in the snapshot
         auto itMeSnap = bucketsCopy.find(msAgentName);
         if (itMeSnap == bucketsCopy.end()) {
             std::cerr << "[SE3] msAgentName '" << msAgentName
                     << "' not found in gAgentBuckets snapshot.\n";
         } else {
+
             AgentBuckets &meBucketSnap = itMeSnap->second;
 
-            // 2) For each OTHER agent, compute SE3 from snapshot (no locks here)
+            // For each OTHER agent, compute SE3 from snapshot (no locks here)
             std::map<std::string, SE3> transformsToApply;  // otherName -> T_me_from_other
 
             for (auto &ka : bucketsCopy) {
@@ -563,22 +610,31 @@ void HighQualityManager::Run()
 
                 AgentBuckets &otherBucketSnap = ka.second;
 
-                // need some KF matches first
                 if (otherBucketSnap.best_pairs.size() < (size_t)kMinPairsForFusion) {
                     std::cout << "[SE3] Skipping agent " << otherName
-                              << ": only " << otherBucketSnap.best_pairs.size()
-                              << " KF matches.\n";
+                            << ": only " << otherBucketSnap.best_pairs.size()
+                            << " KF matches.\n";
                     continue;
                 }
 
+                // --- stats you asked for ---
+                int matchedFramesAfterRansac = 0;      // how many KF pairs survived pair-RANSAC
+                size_t pooledInliersCount    = 0;      // total pooled correspondences (all inliers across pairs)
+                int pooledRansacInliers      = -1;     // inliers from the final pooled RANSAC (if run)
+
+                // pool of inlier correspondences across KF pairs
+                std::vector<cv::Point3f> poolP1, poolP2;
+                poolP1.reserve(1024);
+                poolP2.reserve(1024);
+
+                // also keep per-pair estimates for fallback fusion (your old approach)
                 std::vector<PairEst> pair_ests;
                 pair_ests.reserve(otherBucketSnap.best_pairs.size());
 
                 for (const auto &kb : otherBucketSnap.best_pairs) {
-                    int kf_me    = kb.first;        // this agent's KF id
-                    int kf_other = kb.second.kf;    // other agent's KF id
+                    const int kf_me    = kb.first;
+                    const int kf_other = kb.second.kf;
 
-                    // build 3D correspondences from those two KFs (from snapshot)
                     Pairs3D pairs = build_3d_pairs_from_kf(
                         kf_me, kf_other,
                         meBucketSnap.kf2descs,
@@ -590,8 +646,9 @@ void HighQualityManager::Run()
 
                     const int N = (int)pairs.P1.size();
                     if (N < kMinPointsPerPair) {
-                        std::cout << "[SE3] Pair " << kf_me << " - " << kf_other
-                                  << " rejected: N=" << N << " < " << kMinPointsPerPair << "\n";
+                        // you can keep this print or silence it later
+                        // std::cout << "[SE3] Pair " << kf_me << " - " << kf_other
+                        //           << " rejected: N=" << N << " < " << kMinPointsPerPair << "\n";
                         continue;
                     }
 
@@ -601,12 +658,12 @@ void HighQualityManager::Run()
                         kRansacThresh,
                         kRansacIters,
                         kRansacMinInliers,
-                        1234   // if you want: use a seed based on kf ids instead
+                        make_seed(kf_me, kf_other)
                     );
 
                     if (!r.ok) {
-                        std::cout << "[SE3] Pair " << kf_me << " - " << kf_other
-                                  << " RANSAC failed.\n";
+                        // std::cout << "[SE3] Pair " << kf_me << " - " << kf_other
+                        //           << " RANSAC failed.\n";
                         continue;
                     }
 
@@ -614,54 +671,97 @@ void HighQualityManager::Run()
                     const double ratio_inl = (N > 0) ? (double)inl / (double)N : 0.0;
 
                     if (inl < kRansacMinInliers || ratio_inl < kMinInlierRatio) {
-                        std::cout << "[SE3] Pair " << kf_me << " - " << kf_other
-                                  << " rejected: inliers=" << inl
-                                  << " N=" << N
-                                  << " ratio=" << ratio_inl << "\n";
+                        // std::cout << "[SE3] Pair " << kf_me << " - " << kf_other
+                        //           << " rejected: inliers=" << inl
+                        //           << " N=" << N
+                        //           << " ratio=" << ratio_inl << "\n";
                         continue;
                     }
 
-                    std::cout << "KF " << kf_me << " and KF " << kf_other
-                            << ": inliers = " << inl
-                            << " of " << N
-                            << " (ratio=" << ratio_inl << ")\n";
-
+                    // ACCEPTED pair
+                    matchedFramesAfterRansac++;
                     pair_ests.push_back({kf_me, kf_other, r});
+
+                    // pool the INLIER correspondences for the second-stage RANSAC
+                    poolP1.reserve(poolP1.size() + r.inliers.size());
+                    poolP2.reserve(poolP2.size() + r.inliers.size());
+
+                    for (int idx : r.inliers) {
+                        poolP1.push_back(pairs.P1[idx]);
+                        poolP2.push_back(pairs.P2[idx]);
+                    }
                 }
 
-                if (pair_ests.size() < (size_t)kMinPairsForFusion) {
-                    // not enough robust SE3s to trust a fused transform
+                pooledInliersCount = poolP1.size();
+
+                // Print per-agent summary at this time step
+                std::cout << "[SE3] Agent " << otherName
+                        << " matchedFrames(after pair-RANSAC)=" << matchedFramesAfterRansac
+                        << " pooledInliers=" << pooledInliersCount
+                        << "\n";
+
+                if (matchedFramesAfterRansac < kMinPairsForFusion) {
                     std::cout << "[SE3] Agent " << otherName
-                              << " has only " << pair_ests.size()
-                              << " good pairs; skipping fusion.\n";
+                            << " has only " << matchedFramesAfterRansac
+                            << " good pairs; skipping.\n";
                     continue;
                 }
 
-                // Build weighted list for fusion (weight = #inliers)
-                std::vector<EstSE3Weighted> ests;
-                ests.reserve(pair_ests.size());
-                for (const auto &pe : pair_ests) {
-                    EstSE3Weighted e;
-                    e.T       = pe.est.model;
-                    e.inliers = (int)pe.est.inliers.size();
-                    ests.push_back(e);
+                // ---- second-stage pooled RANSAC ----
+                SE3 T_other_from_me;
+                bool usedPooled = false;
+
+                if (matchedFramesAfterRansac >= kMinMatchedFramesForPool &&
+                    (int)pooledInliersCount >= kMinPoolSizeForRansac)
+                {
+                    RansacSE3 rp = estimate_se3_ransac(
+                        poolP1,
+                        poolP2,
+                        kRansacThresh,
+                        kRansacIters,
+                        kRansacMinInliers,
+                        99991u
+                    );
+
+                    if (rp.ok) {
+                        usedPooled = true;
+                        T_other_from_me = rp.model;
+                        pooledRansacInliers = (int)rp.inliers.size();
+
+                        std::cout << "[SE3] Agent " << otherName
+                                << " pooled-RANSAC inliers=" << pooledRansacInliers
+                                << " / " << pooledInliersCount
+                                << " (ratio=" << (pooledInliersCount ? (double)pooledRansacInliers / pooledInliersCount : 0.0)
+                                << ")\n";
+                    } else {
+                        std::cout << "[SE3] Agent " << otherName
+                                << " pooled-RANSAC failed; falling back to fusion.\n";
+                    }
                 }
 
-                // Fuse SE3s: T_other_from_me: p_other ≈ R * p_me + t
-                SE3 T_other_from_me = fuse_transforms_weighted(ests);
+                // ---- fallback: fuse per-pair SE3s (your old approach) ----
+                if (!usedPooled) {
+                    std::vector<EstSE3Weighted> ests;
+                    ests.reserve(pair_ests.size());
+                    for (const auto &pe : pair_ests) {
+                        EstSE3Weighted e;
+                        e.T       = pe.est.model;
+                        e.inliers = (int)pe.est.inliers.size();
+                        ests.push_back(e);
+                    }
+                    T_other_from_me = fuse_transforms_weighted(ests);
+                }
+
                 // We want transform from other agent -> this agent
                 SE3 T_me_from_other = invert(T_other_from_me);
 
-                // Store result to apply later under lock
                 transformsToApply[otherName] = T_me_from_other;
 
-                // Debug: print Euler angles (in degrees) for sanity
+                // Debug: print Euler angles (in degrees)
                 const cv::Matx33d &R = T_me_from_other.R;
                 double yaw   = std::atan2(R(1,0), R(0,0));
                 double pitch = std::asin(-R(2,0));
                 double roll  = std::atan2(R(2,1), R(2,2));
-
-                auto rad2deg = [](double r){ return r * 180.0 / M_PI; };
 
                 std::cout << "\nFused transform " << otherName
                         << " --> " << msAgentName << ":\n"
@@ -672,7 +772,7 @@ void HighQualityManager::Run()
                         << " yaw="   << rad2deg(yaw) << "\n\n";
             }
 
-            // 3) Apply the fused transforms back to the *live* buckets under a short lock
+            // Apply back to live buckets under a short lock
             if (!transformsToApply.empty()) {
                 std::unique_lock<std::mutex> glock(gBucketsMx);
                 for (const auto &kv : transformsToApply) {
@@ -688,7 +788,6 @@ void HighQualityManager::Run()
                 }
             }
         }
-
     }
 }
 
