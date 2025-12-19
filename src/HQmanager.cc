@@ -61,6 +61,7 @@ struct AgentBuckets {
 
 
 std::map<std::string, AgentBuckets> gAgentBuckets;
+std::unordered_map<std::string, std::unordered_set<int>> nMpsPerAgent;
 std::mutex gBucketsMx;
 std::unordered_map<int, std::vector<Candidate>> matched_frames;
 std::vector<PairEst> pair_ests;
@@ -1093,8 +1094,16 @@ bool HighQualityManager::ComputeBowForKF(const ORBVocabulary* voc,
 void HighQualityManager::ImportHighQualityMapPoints(
     const std::string &agent_name,
     const std::vector<MapPoint*> &vMPs)
-{
+{   
+
     std::unique_lock<std::mutex> glock(gBucketsMx);
+    
+    for (const auto* MP : vMPs) {
+        nMpsPerAgent[agent_name].insert(MP->mnId);
+    }
+    std::cout << "Agent " << agent_name << " has "
+              << nMpsPerAgent[agent_name].size()
+              << " Map Points";
 
     // ==== PHASE 1: mutate buckets (WRITE LOCK) ====
     

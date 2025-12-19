@@ -664,7 +664,7 @@ int main(int argc, char** argv)
             matched_frames[kf_a].push_back({kf_b, sc});
         }
         
-        const double floor_score = 0.03; // empirical floor
+        const double floor_score = 0.02; // empirical floor
         const double rel_cut = 0.70 * best; // relative to best
         const double thresh = std::max(floor_score, rel_cut);
 
@@ -708,10 +708,10 @@ int main(int argc, char** argv)
                       << std::to_string(pr.kf1) << " and "
                       << std::to_string(pr.kf2) << "\n";
         } else {
-            // std::cout << "Number of 3d pairs for KF "
-            //           << std::to_string(pr.kf1) << " and "
-            //           << std::to_string(pr.kf2) << ": "
-            //           << pairs.P1.size() << "\n";
+            std::cout << "Number of 3d pairs for KF "
+                      << std::to_string(pr.kf1) << " and "
+                      << std::to_string(pr.kf2) << ": "
+                      << pairs.P1.size() << "\n";
         }
 
         RansacSE3 r = estimate_se3_ransac(
