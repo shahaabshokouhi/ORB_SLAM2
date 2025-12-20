@@ -1111,8 +1111,8 @@ void HighQualityManager::ImportHighQualityMapPoints(
     // std::vector<MapPoint*> &vAgentPoints = mImportedPointsByAgent[agent_name];
     // per-agent “buckets” in this .cc
     AgentBuckets &agentBucket = gAgentBuckets[agent_name];
-    std::cout << "Importing " << vMPs.size() << " points from "
-              << agent_name << std::endl;
+    // std::cout << "Importing " << vMPs.size() << " points from "
+    //           << agent_name << std::endl;
     std::unordered_set<int> updated_keyframes;
 
     for (ORB_SLAM2::MapPoint* pSrcMP : vMPs) {
@@ -1221,7 +1221,7 @@ void HighQualityManager::ImportHighQualityMapPoints(
     std::unordered_map<int, std::vector<Candidate>> matched_frames;
 
     // Stronger BoW thresholds
-    const double bow_floor_score = 0.04;  // was 0.03, too permissive
+    const double bow_floor_score = 1.04;  // was 0.03, too permissive
     const double bow_rel_cut    = 0.70;
 
     if (agent_name != msAgentName)
