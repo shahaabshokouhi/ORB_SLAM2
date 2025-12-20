@@ -68,15 +68,15 @@ std::vector<PairEst> pair_ests;
 
 // matching parameters
 const float ratio = 0.9f;
-const int maxHam = 80;
+const int maxHam = 60;
 
 // RANSAC + fusion thresholds
-const double kRansacThresh       = 0.10;   // same as before (meters)
+const double kRansacThresh       = 0.07;   // same as before (meters)
 const int    kRansacIters        = 2000;
-const int    kRansacMinInliers   = 5;      // minimal to even consider an SE3
-const int    kMinPointsPerPair   = 5;     // ignore small matches (N < this)
-const double kMinInlierRatio     = 0.4;   // inliers / N
-const int    kMinPairsForFusion  = 1;      // need at least this many KFs to fuse
+const int    kRansacMinInliers   = 20;      // minimal to even consider an SE3
+const int    kMinPointsPerPair   = 20;     // ignore small matches (N < this)
+const double kMinInlierRatio     = 0.2;   // inliers / N
+const int    kMinPairsForFusion  = 3;      // need at least this many KFs to fuse
 
 
 } 
@@ -710,6 +710,7 @@ void HighQualityManager::Run()
 
                 // ---- second-stage pooled RANSAC ----
                 SE3 T_other_from_me;
+                SE3 T_other_from_me_from_fuse;
                 bool usedPooled = false;
 
                 if (matchedFramesAfterRansac >= kMinMatchedFramesForPool &&
@@ -741,7 +742,7 @@ void HighQualityManager::Run()
                 }
 
                 // ---- fallback: fuse per-pair SE3s (your old approach) ----
-                if (!usedPooled) {
+                if (true) {
                     std::vector<EstSE3Weighted> ests;
                     ests.reserve(pair_ests.size());
                     for (const auto &pe : pair_ests) {
@@ -750,12 +751,12 @@ void HighQualityManager::Run()
                         e.inliers = (int)pe.est.inliers.size();
                         ests.push_back(e);
                     }
-                    T_other_from_me = fuse_transforms_weighted(ests);
+                    T_other_from_me_from_fuse = fuse_transforms_weighted(ests);
                 }
 
                 // We want transform from other agent -> this agent
                 SE3 T_me_from_other = invert(T_other_from_me);
-
+                SE3 T_me_from_other_from_fuse = invert(T_other_from_me_from_fuse);
                 transformsToApply[otherName] = T_me_from_other;
 
                 // Debug: print Euler angles (in degrees)
@@ -764,13 +765,28 @@ void HighQualityManager::Run()
                 double pitch = std::asin(-R(2,0));
                 double roll  = std::atan2(R(2,1), R(2,2));
 
-                std::cout << "\nFused transform " << otherName
+                // Debug: print Euler angles (in degrees)
+                const cv::Matx33d &R = T_me_from_other_from_fuse.R;
+                double yaw_fuse   = std::atan2(R(1,0), R(0,0));
+                double pitch_fuse = std::asin(-R(2,0));
+                double roll_fuse  = std::atan2(R(2,1), R(2,2));
+
+                std::cout << "\nFused transform from pool " << otherName
                         << " --> " << msAgentName << ":\n"
                         << "R = \n" << cv::Mat(T_me_from_other.R) << "\n"
                         << "t = " << T_me_from_other.t << "\n"
                         << "angles (deg): roll="  << rad2deg(roll)
                         << " pitch=" << rad2deg(pitch)
                         << " yaw="   << rad2deg(yaw) << "\n\n";
+
+                
+                std::cout << "\nFused transform from fuse " << otherName
+                        << " --> " << msAgentName << ":\n"
+                        << "R = \n" << cv::Mat(T_me_from_other_from_fuse.R) << "\n"
+                        << "t = " << T_me_from_other_from_fuse.t << "\n"
+                        << "angles (deg): roll="  << rad2deg(roll_fuse)
+                        << " pitch=" << rad2deg(pitch_fuse)
+                        << " yaw="   << rad2deg(yaw_fuse) << "\n\n";
             }
 
             // Apply back to live buckets under a short lock
@@ -1221,7 +1237,7 @@ void HighQualityManager::ImportHighQualityMapPoints(
     std::unordered_map<int, std::vector<Candidate>> matched_frames;
 
     // Stronger BoW thresholds
-    const double bow_floor_score = 1.04;  // was 0.03, too permissive
+    const double bow_floor_score = 0.02;  // was 0.03, too permissive
     const double bow_rel_cut    = 0.70;
 
     if (agent_name != msAgentName)
