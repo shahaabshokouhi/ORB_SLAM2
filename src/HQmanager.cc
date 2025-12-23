@@ -688,9 +688,9 @@ void HighQualityManager::Run()
 
                     const int N = (int)pairs.P1.size();
                     if (N < kMinPointsPerPair) {
-                        // you can keep this print or silence it later
-                        // std::cout << "[SE3] Pair " << kf_me << " - " << kf_other
-                        //           << " rejected: N=" << N << " < " << kMinPointsPerPair << "\n";
+                        you can keep this print or silence it later
+                        std::cout << "[SE3] Pair " << kf_me << " - " << kf_other
+                                  << " rejected: N=" << N << " < " << kMinPointsPerPair << "\n";
                         continue;
                     }
 
@@ -704,8 +704,8 @@ void HighQualityManager::Run()
                     );
 
                     if (!r.ok) {
-                        // std::cout << "[SE3] Pair " << kf_me << " - " << kf_other
-                        //           << " RANSAC failed.\n";
+                        std::cout << "[SE3] Pair " << kf_me << " - " << kf_other
+                                  << " RANSAC failed.\n";
                         continue;
                     }
 
@@ -713,10 +713,10 @@ void HighQualityManager::Run()
                     const double ratio_inl = (N > 0) ? (double)inl / (double)N : 0.0;
 
                     if (inl < kRansacMinInliers || ratio_inl < kMinInlierRatio) {
-                        // std::cout << "[SE3] Pair " << kf_me << " - " << kf_other
-                        //           << " rejected: inliers=" << inl
-                        //           << " N=" << N
-                        //           << " ratio=" << ratio_inl << "\n";
+                        std::cout << "[SE3] Pair " << kf_me << " - " << kf_other
+                                  << " rejected: inliers=" << inl
+                                  << " N=" << N
+                                  << " ratio=" << ratio_inl << "\n";
                         continue;
                     }
 
