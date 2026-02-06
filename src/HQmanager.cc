@@ -31,7 +31,7 @@ namespace {
         cv::Matx33d R;
         cv::Vec3d   t;
     };
-    struct Candidate { int kf; double score; };
+    struct Candidate { KeyFrame* pkf; int kf; double score; };
     struct Pair      { int kf1; int kf2; double score; };
     struct Pairs3D {
         int kf2;
@@ -45,7 +45,7 @@ namespace {
         bool ok = false;
     };
     struct EstSE3Weighted { SE3 T; int inliers=0;};
-    struct PairEst { int kf1; int kf2; RansacSE3 est; };
+    struct PairEst { KeyFrame* pkf; int kf2; RansacSE3 est; };
     struct AgentBuckets {
         std::unordered_map<int, std::vector<cv::Mat>>     kf2descs;
         std::unordered_map<int, std::vector<cv::Point3f>> kf2pts;
@@ -431,46 +431,75 @@ static SE3 invert(const SE3& T)
 }
 
 static Pairs3D build_3d_pairs_from_kf(
-    int kf1, int kf2,
-    const std::unordered_map<int, std::vector<cv::Mat>>& kf2descs_1,
+    KeyFrame* pkf, int kf2,
     const std::unordered_map<int, std::vector<cv::Mat>>& kf2descs_2,
-    const std::unordered_map<int, std::vector<cv::Point3f>>& kf2pts_1,
     const std::unordered_map<int, std::vector<cv::Point3f>>& kf2pts_2,
     float ratio=0.9f, int maxHamming=60)
 {
     Pairs3D out;
-    auto itD1 = kf2descs_1.find(kf1);
-    auto itD2 = kf2descs_2.find(kf2);
-    auto itP1 = kf2pts_1.find(kf1);
-    auto itP2 = kf2pts_2.find(kf2);
-    if (itD1==kf2descs_1.end() || itD2==kf2descs_2.end()||
-        itP1==kf2pts_1.end() || itP2==kf2pts_2.end())
-        return out;
+    if (!pkf) return out;
 
-    const auto& D1v = itD1->second;
+    vector<MapPoint*> vpMp = pkf->GetHighQualityMapPoints();
+
+    std::vector<cv::Mat> D1v;
+    std::vector<cv::Point3f> P1v;
+
+    D1v.reserve(vpMp.size());
+    P1v.reserve(vpMp.size());
+
+    for (auto& pMp: vpMp) {
+        if (!pMp || pMp->isBad() || pMp->mDescriptor.empty()) continue;
+
+        cv::Mat d = pMp->mDescriptor;
+
+        if (d.rows != 1) d = d.reshape(1, 1);           // force one row
+        if (d.type() != CV_8U) d.convertTo(d, CV_8U);   // should already be CV_8U
+        D1v.push_back(d.clone());                       // clone to avoid aliasing
+
+        // 3D point in world
+        // ORB-SLAM2 has `cv::Mat GetWorldPos()`
+        cv::Mat Xw = pMp->GetWorldPos();
+        if (Xw.empty()) { D1v.pop_back(); continue; }
+        Xw = Xw.reshape(1, 3);                          // make sure it's 3x1 or 1x3-ish
+
+        cv::Point3f p;
+        p.x = Xw.at<float>(0);
+        p.y = Xw.at<float>(1);
+        p.z = Xw.at<float>(2);
+
+        if (!finite3(p)) { D1v.pop_back(); continue; }  // keep vectors aligned
+        P1v.push_back(p);
+    }
+
+    auto itD2 = kf2descs_2.find(kf2);
+    auto itP2 = kf2pts_2.find(kf2);
+    if (itD2==kf2descs_2.end() || itP2==kf2pts_2.end()) return out;
+
     const auto& D2v = itD2->second;
-    const auto& P1v = itP1->second;
     const auto& P2v = itP2->second;
 
     if (D1v.empty() || D2v.empty()) return out;
-    CV_Assert((int)D1v.size()==(int)P1v.size());
-    CV_Assert((int)D2v.size()==(int)P2v.size());
+    if (D1v.size() != P1v.size()) return out;
+    if (D2v.size() != P2v.size()) return out;
 
     cv::Mat A = stack_rows(D1v);
     cv::Mat B = stack_rows(D2v);
+    if (A.empty() || B.empty()) return out;
 
     cv::BFMatcher matcher(cv::NORM_HAMMING, false);
     std::vector<std::vector<cv::DMatch>> knn;
     matcher.knnMatch(A, B, knn, 2);
 
     int raw_matches = 0;
-
     std::vector<cv::DMatch> good;
     good.reserve(knn.size());
-    for(auto& v : knn) {
+
+    for (auto& v : knn) {
         if (v.empty()) continue;
         ++raw_matches;
+
         if (v.size() < 2) continue;
+
         const auto& m1 = v[0];
         const auto& m2 = v[1];
         if (m1.distance <= maxHamming && m1.distance <= ratio*m2.distance) {
@@ -479,15 +508,21 @@ static Pairs3D build_3d_pairs_from_kf(
     
     }
 
-    std::cout << "[MATCH DEBUG] KF_me=" << kf1
+    std::cout << "[MATCH DEBUG] KF_me=" << pkf->mnId
           << " KF_other=" << kf2
           << " raw_knn=" << raw_matches
           << " good=" << good.size() << std::endl;
 
     for (const auto& m : good) {
+
+        if (m.queryIdx < 0 || m.queryIdx >= (int)P1v.size()) continue;
+        if (m.trainIdx < 0 || m.trainIdx >= (int)P2v.size()) continue;
+
         const cv::Point3f& X1 = P1v[m.queryIdx];
         const cv::Point3f& X2 = P2v[m.trainIdx];
+
         if (!finite3(X1) || !finite3(X2)) continue;
+
         out.P1.push_back(X1);
         out.P2.push_back(X2);
         out.matches.push_back(m);
@@ -528,7 +563,7 @@ void HighQualityManager::Run()
         // ----------------------------
         // Thresholds (tune here)
         // ----------------------------
-        const int   kMinObs                = 0;      // baseline
+        const int   kMinObs                = 6;      // baseline
         const float kMinFoundRatio         = 0.90f;  // 0.25..0.5 typical
         const int   kMaxScaleLevelDiff     = 1;      // |oct - pred| <= 1
         const float kMinViewCos            = 0.70f;  // cos(60 deg)
@@ -561,8 +596,8 @@ void HighQualityManager::Run()
                 mpMap->RemoveHighQaulityMapPoints(pMP);
             }
         }
-        vector<KeyFrame*> vKFs = mpMap->GetAllKeyFrames();
-        for (KeyFrame* pKF : vKFs) {
+        vector<KeyFrame*> vpKFs = mpMap->GetAllKeyFrames();
+        for (KeyFrame* pKF : vpKFs) {
             if (!pKF) continue;
 
             if (pKF->NeedsHQBoWUpdate()) {
@@ -591,13 +626,9 @@ void HighQualityManager::Run()
         auto rad2deg = [](double r){ return r * 180.0 / M_PI; };
 
         // Make sure we actually have our own agent in the snapshot
-        auto itMeSnap = bucketsCopy.find(msAgentName);
-        if (itMeSnap == bucketsCopy.end()) {
-            std::cerr << "[SE3] msAgentName '" << msAgentName
-                    << "' not found in gAgentBuckets snapshot.\n";
+        if (bucketsCopy.empty()) {
+            std::cerr << "No information received yet, waiting ...\n";
         } else {
-
-            AgentBuckets &meBucketSnap = itMeSnap->second;
 
             // For each OTHER agent, compute SE3 from snapshot (no locks here)
             std::map<std::string, SE3> transformsToApply;  // otherName -> T_me_from_other
@@ -608,14 +639,15 @@ void HighQualityManager::Run()
 
                 AgentBuckets &otherBucketSnap = ka.second;
 
+                std::vector<Candidate> matchedCandidates;
+
                 // kf pairing
-                for (const auto &kv_me : meBucketSnap.kf2bow) {
-                    int kf_me = kv_me.first;
-                    const auto &bow_me = kv_me.second;
+                for (KeyFrame* pkf_me : vpKFs) {
+                    int kf_me = pkf_me->mnId;
+                    const auto &bow_me = pkf_me->mHQBowVec;
 
                     double best_score = 0.0;
                     std::vector<Candidate> cands;
-                    cands.reserve(meBucketSnap.kf2bow.size());
 
                     // compare this agent's kf_me with each NEW keyframe from 'agent_name'
                     for (const auto &kv_other : otherBucketSnap.kf2bow) {
@@ -623,7 +655,7 @@ void HighQualityManager::Run()
                         const auto &bow_other = kv_other.second;
 
                         double sc = mpVoc->score(bow_me, bow_other);
-                        cands.push_back({kf_other, sc});
+                        cands.push_back({pkf_me, kf_other, sc});
                         if (sc > best_score) best_score = sc;
                     }
 
@@ -647,14 +679,13 @@ void HighQualityManager::Run()
                             });
 
                     const Candidate new_best = cands.front();
-                    otherBucketSnap.best_pairs[kf_me] = new_best;
-
+                    matchedCandidates.push_back(new_best);
                 }
 
 
-                if (otherBucketSnap.best_pairs.size() < (size_t)kMinPairsForFusion) {
+                if (matchedCandidates.size() < (size_t)kMinPairsForFusion) {
                     std::cout << "[SE3] Skipping agent " << otherName
-                            << ": only " << otherBucketSnap.best_pairs.size()
+                            << ": only " << matchedCandidates.size()
                             << " KF matches.\n";
                     continue;
                 }
@@ -671,26 +702,23 @@ void HighQualityManager::Run()
 
                 // also keep per-pair estimates for fallback fusion (your old approach)
                 std::vector<PairEst> pair_ests;
-                pair_ests.reserve(otherBucketSnap.best_pairs.size());
+                pair_ests.reserve(matchedCandidates.size());
 
-                for (const auto &kb : otherBucketSnap.best_pairs) {
-                    const int kf_me    = kb.first;
-                    const int kf_other = kb.second.kf;
+                for (auto &candidate : matchedCandidates) {
+                    KeyFrame* pkf = candidate.pkf;
+                    const int kf_other = candidate.kf;
 
                     Pairs3D pairs = build_3d_pairs_from_kf(
-                        kf_me, kf_other,
-                        meBucketSnap.kf2descs,
+                        pkf, kf_other,
                         otherBucketSnap.kf2descs,
-                        meBucketSnap.kf2pts,
                         otherBucketSnap.kf2pts,
                         ratio, maxHam
                     );
 
                     const int N = (int)pairs.P1.size();
                     if (N < kMinPointsPerPair) {
-                        you can keep this print or silence it later
-                        std::cout << "[SE3] Pair " << kf_me << " - " << kf_other
-                                  << " rejected: N=" << N << " < " << kMinPointsPerPair << "\n";
+                        std::cout << "[SE3] Pair " << pkf->mnId << " - " << kf_other
+                                  << " rejected: N = " << N << " < " << kMinPointsPerPair << "\n";
                         continue;
                     }
 
@@ -700,11 +728,11 @@ void HighQualityManager::Run()
                         kRansacThresh,
                         kRansacIters,
                         kRansacMinInliers,
-                        make_seed(kf_me, kf_other)
+                        make_seed(pkf->mnId, kf_other)
                     );
 
                     if (!r.ok) {
-                        std::cout << "[SE3] Pair " << kf_me << " - " << kf_other
+                        std::cout << "[SE3] Pair " << pkf->mnId << " - " << kf_other
                                   << " RANSAC failed.\n";
                         continue;
                     }
@@ -713,7 +741,7 @@ void HighQualityManager::Run()
                     const double ratio_inl = (N > 0) ? (double)inl / (double)N : 0.0;
 
                     if (inl < kRansacMinInliers || ratio_inl < kMinInlierRatio) {
-                        std::cout << "[SE3] Pair " << kf_me << " - " << kf_other
+                        std::cout << "[SE3] Pair " << pkf->mnId << " - " << kf_other
                                   << " rejected: inliers=" << inl
                                   << " N=" << N
                                   << " ratio=" << ratio_inl << "\n";
@@ -722,7 +750,7 @@ void HighQualityManager::Run()
 
                     // ACCEPTED pair
                     matchedFramesAfterRansac++;
-                    pair_ests.push_back({kf_me, kf_other, r});
+                    pair_ests.push_back({pkf, kf_other, r});
 
                     // pool the INLIER correspondences for the second-stage RANSAC
                     poolP1.reserve(poolP1.size() + r.inliers.size());

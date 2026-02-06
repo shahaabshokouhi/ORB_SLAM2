@@ -131,6 +131,8 @@ public:
     long unsigned int mnCorrectedByKF;
     long unsigned int mnCorrectedReference;    
     cv::Mat mPosGBA;
+    cv::Mat mDescriptor;
+
     long unsigned int mnBAGlobalForKF;
 
     static std::mutex mGlobalMutex;
@@ -155,7 +157,6 @@ protected:
      cv::Mat mNormalVector;
 
      // Best descriptor to fast matching
-     cv::Mat mDescriptor;
 
      // Reference KeyFrame
      KeyFrame* mpRefKF;
