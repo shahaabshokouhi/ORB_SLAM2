@@ -80,6 +80,7 @@ namespace {
 
     const double bow_floor_score = 0.02;  // was 0.03, too permissive
     const double bow_rel_cut    = 0.70;
+    const bool printLog = false;
 
 
 } 
@@ -164,7 +165,7 @@ static RansacSE3 estimate_se3_ransac(
 {
     RansacSE3 out;
     const int N = (int)P1.size();
-    if (N < 3 || (int)P2.size() != N) {
+    if ((N < 3 || (int)P2.size() != N) && printLog) {
         std::cout << "[RANSAC] early exit: N=" << N 
                   << " P2.size=" << P2.size() << "\n";
         return out;
@@ -246,7 +247,7 @@ static RansacSE3 estimate_se3_ransac(
 
     SE3 refit;
 
-    if (!umeyama_rigid(iP, iQ, refit)) {
+    if (!umeyama_rigid(iP, iQ, refit) && printLog) {
         std::cout << "[RANSAC] refit failed in Umeyama\n";
         return out;
     }
@@ -507,11 +508,13 @@ static Pairs3D build_3d_pairs_from_kf(
         }
     
     }
+    if (printLog) {
+        std::cout << "[MATCH DEBUG] KF_me=" << pkf->mnId
+            << " KF_other=" << kf2
+            << " raw_knn=" << raw_matches
+            << " good=" << good.size() << std::endl;
+    }
 
-    std::cout << "[MATCH DEBUG] KF_me=" << pkf->mnId
-          << " KF_other=" << kf2
-          << " raw_knn=" << raw_matches
-          << " good=" << good.size() << std::endl;
 
     for (const auto& m : good) {
 
@@ -605,6 +608,11 @@ void HighQualityManager::Run()
                 pKF->ClearHQBoWUpdateFlag();
             }
         }
+        // Debugging
+        vector<MapPoint*> mapPoints = mpMap->GetHighQualityMapPoints();
+        std::cout << "Host map point size: " << mapPoints.size() << std::endl;
+        mapPoints.clear();
+
         // === OLD BLOCK REPLACED BY THIS ===
 
         // 1) Take a snapshot of the current buckets under a short lock
@@ -684,9 +692,13 @@ void HighQualityManager::Run()
 
 
                 if (matchedCandidates.size() < (size_t)kMinPairsForFusion) {
-                    std::cout << "[SE3] Skipping agent " << otherName
-                            << ": only " << matchedCandidates.size()
-                            << " KF matches.\n";
+
+                    if (printLog) {
+                        std::cout << "[SE3] Skipping agent " << otherName
+                                << ": only " << matchedCandidates.size()
+                                << " KF matches.\n";
+                    }
+
                     continue;
                 }
 
@@ -717,8 +729,12 @@ void HighQualityManager::Run()
 
                     const int N = (int)pairs.P1.size();
                     if (N < kMinPointsPerPair) {
-                        std::cout << "[SE3] Pair " << pkf->mnId << " - " << kf_other
+
+                        if (printLog) {
+                            std::cout << "[SE3] Pair " << pkf->mnId << " - " << kf_other
                                   << " rejected: N = " << N << " < " << kMinPointsPerPair << "\n";
+                        }
+
                         continue;
                     }
 
@@ -732,8 +748,12 @@ void HighQualityManager::Run()
                     );
 
                     if (!r.ok) {
-                        std::cout << "[SE3] Pair " << pkf->mnId << " - " << kf_other
+
+                        if (printLog) {
+                            std::cout << "[SE3] Pair " << pkf->mnId << " - " << kf_other
                                   << " RANSAC failed.\n";
+                        }
+
                         continue;
                     }
 
@@ -741,10 +761,14 @@ void HighQualityManager::Run()
                     const double ratio_inl = (N > 0) ? (double)inl / (double)N : 0.0;
 
                     if (inl < kRansacMinInliers || ratio_inl < kMinInlierRatio) {
-                        std::cout << "[SE3] Pair " << pkf->mnId << " - " << kf_other
-                                  << " rejected: inliers=" << inl
-                                  << " N=" << N
-                                  << " ratio=" << ratio_inl << "\n";
+
+                        if (printLog) {
+                            std::cout << "[SE3] Pair " << pkf->mnId << " - " << kf_other
+                                    << " rejected: inliers=" << inl
+                                    << " N=" << N
+                                    << " ratio=" << ratio_inl << "\n";
+                        }
+
                         continue;
                     }
 
@@ -765,15 +789,21 @@ void HighQualityManager::Run()
                 pooledInliersCount = poolP1.size();
 
                 // Print per-agent summary at this time step
-                std::cout << "[SE3] Agent " << otherName
-                        << " matchedFrames(after pair-RANSAC)=" << matchedFramesAfterRansac
-                        << " pooledInliers=" << pooledInliersCount
-                        << "\n";
+                if (printLog) {
+                    std::cout << "[SE3] Agent " << otherName
+                            << " matchedFrames(after pair-RANSAC)=" << matchedFramesAfterRansac
+                            << " pooledInliers=" << pooledInliersCount
+                            << "\n";
+                }
+
 
                 if (matchedFramesAfterRansac < kMinPairsForFusion) {
-                    std::cout << "[SE3] Agent " << otherName
-                            << " has only " << matchedFramesAfterRansac
-                            << " good pairs; skipping.\n";
+                    if (printLog) {
+                        std::cout << "[SE3] Agent " << otherName
+                                << " has only " << matchedFramesAfterRansac
+                                << " good pairs; skipping.\n";
+                    }
+
                     continue;
                 }
 
@@ -798,15 +828,19 @@ void HighQualityManager::Run()
                         usedPooled = true;
                         T_other_from_me = rp.model;
                         pooledRansacInliers = (int)rp.inliers.size();
+                        if (printLog) {
+                            std::cout << "[SE3] Agent " << otherName
+                                    << " pooled-RANSAC inliers=" << pooledRansacInliers
+                                    << " / " << pooledInliersCount
+                                    << " (ratio=" << (pooledInliersCount ? (double)pooledRansacInliers / pooledInliersCount : 0.0)
+                                    << ")\n";
+                        }
 
-                        std::cout << "[SE3] Agent " << otherName
-                                << " pooled-RANSAC inliers=" << pooledRansacInliers
-                                << " / " << pooledInliersCount
-                                << " (ratio=" << (pooledInliersCount ? (double)pooledRansacInliers / pooledInliersCount : 0.0)
-                                << ")\n";
                     } else {
-                        std::cout << "[SE3] Agent " << otherName
-                                << " pooled-RANSAC failed; falling back to fusion.\n";
+                        if (printLog) {
+                            std::cout << "[SE3] Agent " << otherName
+                                    << " pooled-RANSAC failed; falling back to fusion.\n";
+                        }
                     }
                 }
 
@@ -1180,6 +1214,7 @@ void HighQualityManager::ImportHighQualityMapPoints(
     const std::string &agent_name,
     const std::vector<MapPoint*> &vMPs)
 {   
+    if (agent_name == msAgentName) return;
 
     std::unique_lock<std::mutex> glock(gBucketsMx);
     
