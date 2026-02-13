@@ -70,7 +70,21 @@ namespace {
     const float ratio = 0.9f;
     const int maxHam = 60;
 
-    // RANSAC + fusion thresholds
+    // ----------------------------
+    // High Quality Selection Thresholds (tune here)
+    // ----------------------------
+    const int   kMinObs                = 10;      // baseline
+    const float kMinFoundRatio         = 0.90f;  // 0.25..0.5 typical
+    const int   kMaxScaleLevelDiff     = 1;      // |oct - pred| <= 1
+    const float kMinViewCos            = 0.70f;  // cos(60 deg)
+    const int   kMinGoodFracPercent    = 60;     // % observations meeting geom checks
+    const int   kMinTemporalSpanFrames = 80;     // observation span requirement
+    const int   kMaxDescHamMean        = 40;     // ORB Hamming mean
+    const int   kMaxDescHamMax         = 60;     // ORB Hamming max
+    const double kMaxReprojErrPx       = 0.0;    // 0 disables reprojection check
+    // ----------------------------
+
+    // RANSAC + Fusion Thresholds
     const double kRansacThresh       = 0.07;   // same as before (meters)
     const int    kRansacIters        = 2000;
     const int    kRansacMinInliers   = 20;      // minimal to even consider an SE3
@@ -80,7 +94,8 @@ namespace {
 
     const double bow_floor_score = 0.02;  // was 0.03, too permissive
     const double bow_rel_cut    = 0.70;
-    const bool printLog = false;
+    const bool printLog = true;
+    // ----------------------------
 
 
 } 
@@ -563,40 +578,33 @@ void HighQualityManager::Run()
         }
 
 
-        // ----------------------------
-        // Thresholds (tune here)
-        // ----------------------------
-        const int   kMinObs                = 6;      // baseline
-        const float kMinFoundRatio         = 0.90f;  // 0.25..0.5 typical
-        const int   kMaxScaleLevelDiff     = 1;      // |oct - pred| <= 1
-        const float kMinViewCos            = 0.70f;  // cos(60 deg)
-        const int   kMinGoodFracPercent    = 60;     // % observations meeting geom checks
-        const int   kMinTemporalSpanFrames = 80;     // observation span requirement
-        const int   kMaxDescHamMean        = 40;     // ORB Hamming mean
-        const int   kMaxDescHamMax         = 60;     // ORB Hamming max
-        const double kMaxReprojErrPx       = 0.0;    // 0 disables reprojection check
-        // ----------------------------
         for (MapPoint* pMP : vMPs) {
-            if (!pMP || pMP->isBad()) continue;
-
+            if (!pMP) continue;
             bool isHQ = false;
 
-            if (crit=="observation") {
-                isHQ = (pMP->Observations() >= kMinObs);
-            } else if (crit=="foundratio") {
-                isHQ = (pMP->GetFoundRatio() >= kMinFoundRatio);
-            } else if (crit=="combo")
-            {
-                isHQ = (pMP->Observations() >= kMinObs) &&
-                       (pMP->GetFoundRatio() >= kMinFoundRatio);
-            }
-            
+            if (pMP->isBad()) {
 
-            ApplyToMapPoint(pMP, isHQ);
-            if (isHQ) {
-                mpMap->AddHighQualityMapPoints(pMP);
-            } else {
+                ApplyToMapPoint(pMP, isHQ);
                 mpMap->RemoveHighQaulityMapPoints(pMP);
+            
+            } else {
+
+                if (crit=="observation") {
+                    isHQ = (pMP->Observations() >= kMinObs);
+                } else if (crit=="foundratio") {
+                    isHQ = (pMP->GetFoundRatio() >= kMinFoundRatio);
+                } else if (crit=="combo")
+                {
+                    isHQ = (pMP->Observations() >= kMinObs) &&
+                        (pMP->GetFoundRatio() >= kMinFoundRatio);
+                }
+                
+                ApplyToMapPoint(pMP, isHQ);
+                if (isHQ) {
+                    mpMap->AddHighQualityMapPoints(pMP);
+                } else {
+                    mpMap->RemoveHighQaulityMapPoints(pMP);
+                }
             }
         }
         vector<KeyFrame*> vpKFs = mpMap->GetAllKeyFrames();
@@ -610,7 +618,7 @@ void HighQualityManager::Run()
         }
         // Debugging
         vector<MapPoint*> mapPoints = mpMap->GetHighQualityMapPoints();
-        std::cout << "Host map point size: " << mapPoints.size() << std::endl;
+        std::cout << "\nHost map point size: " << mapPoints.size() << std::endl;
         mapPoints.clear();
 
         // === OLD BLOCK REPLACED BY THIS ===
@@ -928,7 +936,7 @@ void HighQualityManager::ApplyToMapPoint(MapPoint* pMP, bool isHQ)
     if (wasHQ == isHQ) {
         return;
     }
-
+    if (wasHQ && !isHQ) std::cout << "\nturned to not hq ...." << std::endl;
     pMP->SetHighQuality(isHQ);
 
     // update all keyframes
@@ -1223,7 +1231,7 @@ void HighQualityManager::ImportHighQualityMapPoints(
     }
     std::cout << "Agent " << agent_name << " has "
               << nMpsPerAgent[agent_name].size()
-              << " Map Points";
+              << " Map Points. \n";
 
     // ==== PHASE 1: mutate buckets (WRITE LOCK) ====
     

@@ -134,7 +134,6 @@ int main(int argc, char** argv)
         SLAM.TrackRGBD(imRGB, depth_meter, tframe);
         
         std::vector<ORB_SLAM2::MapPoint*> vpHighObs = SLAM.GetHighQualityMapPoints();
-        std::cout << "High quality map points: " << vpHighObs.size() << std::endl;
         
         // j) Handle exit key
         int key = cv::waitKey(1);
