@@ -73,7 +73,7 @@ namespace {
     // ----------------------------
     // High Quality Selection Thresholds (tune here)
     // ----------------------------
-    const int   kMinObs                = 10;      // baseline
+    const int   kMinObs                = 6;      // baseline
     const float kMinFoundRatio         = 0.90f;  // 0.25..0.5 typical
     const int   kMaxScaleLevelDiff     = 1;      // |oct - pred| <= 1
     const float kMinViewCos            = 0.70f;  // cos(60 deg)
@@ -94,7 +94,7 @@ namespace {
 
     const double bow_floor_score = 0.02;  // was 0.03, too permissive
     const double bow_rel_cut    = 0.70;
-    const bool printLog = true;
+    const bool printLog = false;
     // ----------------------------
 
 
@@ -1226,9 +1226,14 @@ void HighQualityManager::ImportHighQualityMapPoints(
 
     std::unique_lock<std::mutex> glock(gBucketsMx);
     
-    for (const auto* MP : vMPs) {
-        nMpsPerAgent[agent_name].insert(MP->mnId);
+    for (auto* MP : vMPs) {
+        if (MP->isBad() || MP->mvnObservations.size() < kMinObs) {
+            nMpsPerAgent[agent_name].erase(MP->mnId);
+        } else {
+            nMpsPerAgent[agent_name].insert(MP->mnId);
+        }
     }
+
     std::cout << "Agent " << agent_name << " has "
               << nMpsPerAgent[agent_name].size()
               << " Map Points. \n";
@@ -1244,6 +1249,7 @@ void HighQualityManager::ImportHighQualityMapPoints(
     std::unordered_set<int> updated_keyframes;
 
     for (ORB_SLAM2::MapPoint* pSrcMP : vMPs) {
+
         if (!pSrcMP) {
             std::cerr << "[HQManager] skipping null MapPoint from agent " << agent_name << "\n";
             continue;

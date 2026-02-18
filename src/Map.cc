@@ -155,9 +155,15 @@ void Map::RemoveHighQaulityMapPoints(MapPoint* pMP)
     mspHighQualityMapPoints.erase(pMP);
 
     // Also remove from the new queue if it is there
-    auto it = std::find(mQueueNewHighQualityMapPoints.begin(), mQueueNewHighQualityMapPoints.end(), pMP);
-    if (it != mQueueNewHighQualityMapPoints.end()) {
-        mQueueNewHighQualityMapPoints.erase(it);
+
+    if (pMP->IsSentToOther()) {
+        mQueueNewHighQualityMapPoints.push_back(pMP);
+        pMP->mbQueuedForHq = true;
+    } else {
+        auto it = std::find(mQueueNewHighQualityMapPoints.begin(), mQueueNewHighQualityMapPoints.end(), pMP);
+        if (it != mQueueNewHighQualityMapPoints.end()) {
+            mQueueNewHighQualityMapPoints.erase(it);
+        }
     }
 }
 
@@ -184,7 +190,7 @@ vector<MapPoint*> Map::PopNewHighQualityMapPoints()
     {
         MapPoint* pMP = mQueueNewHighQualityMapPoints.front();
         mQueueNewHighQualityMapPoints.pop_front();
-        
+        pMP->SentToOther(true);
         out.push_back(pMP);
         sentCount++;
     }
