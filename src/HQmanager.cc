@@ -73,7 +73,7 @@ namespace {
     // ----------------------------
     // High Quality Selection Thresholds (tune here)
     // ----------------------------
-    const int   kMinObs                = 6;      // baseline
+    const int   kMinObs                = 0;      // baseline
     const float kMinFoundRatio         = 0.90f;  // 0.25..0.5 typical
     const int   kMaxScaleLevelDiff     = 1;      // |oct - pred| <= 1
     const float kMinViewCos            = 0.70f;  // cos(60 deg)
