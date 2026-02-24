@@ -53,6 +53,11 @@ void Map::EraseMapPoint(MapPoint *pMP)
     {
         unique_lock<mutex> lock2(mMutexMap);
         mspHighQualityMapPoints.erase(pMP);
+        // If this point was already sent to other agents, re-queue it so they
+        // receive a message with is_bad=true and can remove it from their archive.
+        if (pMP->IsSentToOther()) {
+            mQueueNewHighQualityMapPoints.push_back(pMP);
+        }
     }
     // TODO: This only erase the pointer.
     // Delete the MapPoint
