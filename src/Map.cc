@@ -163,7 +163,7 @@ void Map::RemoveHighQaulityMapPoints(MapPoint* pMP)
 
     if (pMP->IsSentToOther()) {
         mQueueNewHighQualityMapPoints.push_back(pMP);
-        pMP->mbQueuedForHq = true;
+        pMP->mbQueuedForHq = false;
     } else {
         auto it = std::find(mQueueNewHighQualityMapPoints.begin(), mQueueNewHighQualityMapPoints.end(), pMP);
         if (it != mQueueNewHighQualityMapPoints.end()) {

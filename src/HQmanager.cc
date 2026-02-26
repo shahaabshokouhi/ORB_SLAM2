@@ -936,7 +936,7 @@ void HighQualityManager::ApplyToMapPoint(MapPoint* pMP, bool isHQ)
     if (wasHQ == isHQ) {
         return;
     }
-    if (wasHQ && !isHQ) std::cout << "\nturned to not hq ...." << std::endl;
+    // if (wasHQ && !isHQ) std::cout << "\nturned to not hq ...." << std::endl;
     pMP->SetHighQuality(isHQ);
 
     // update all keyframes
@@ -1227,7 +1227,7 @@ void HighQualityManager::ImportHighQualityMapPoints(
     std::unique_lock<std::mutex> glock(gBucketsMx);
     
     for (auto* MP : vMPs) {
-        if (MP->isBad() || MP->mvnObservations.size() < kMinObs) {
+        if (MP->isBad() || !MP->mbHighQaulity) {
             nMpsPerAgent[agent_name].erase(MP->mnId);
         } else {
             nMpsPerAgent[agent_name].insert(MP->mnId);
@@ -1256,12 +1256,12 @@ void HighQualityManager::ImportHighQualityMapPoints(
         }
 
         // 1) check observations list
-        if (pSrcMP->mvnObservations.empty()) {
-            // not fatal, but tell ourselves
-            std::cerr << "[HQManager] MapPoint " << pSrcMP->mnId
-                    << " from agent " << agent_name
-                    << " has no observation KF ids; skipping bucket fill.\n";
-        }
+        // if (pSrcMP->mvnObservations.empty()) {
+        //     // not fatal, but tell ourselves
+        //     std::cerr << "[HQManager] MapPoint " << pSrcMP->mnId
+        //             << " from agent " << agent_name
+        //             << " has no observation KF ids; skipping bucket fill.\n";
+        // }
 
         // 2) get world pos safely
         cv::Mat X = pSrcMP->GetWorldPos();
