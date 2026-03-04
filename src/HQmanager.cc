@@ -67,32 +67,42 @@ namespace {
     std::vector<PairEst> pair_ests;
 
     // matching parameters
-    const float ratio = 0.9f;
-    const int maxHam = 60;
+    // ratio: tightened 0.9->0.75 to reduce false positives when maxHam is relaxed
+    // maxHam: relaxed 60->100; cross-agent ORB matches at different viewpoints
+    //         routinely land in the 60-100 range and were being discarded
+    const float ratio = 0.75f;
+    const int maxHam = 100;
 
     // ----------------------------
     // High Quality Selection Thresholds (tune here)
     // ----------------------------
-    const int   kMinObs                = 6;      // baseline
-    const float kMinFoundRatio         = 0.90f;  // 0.25..0.5 typical
-    const int   kMaxScaleLevelDiff     = 1;      // |oct - pred| <= 1
-    const float kMinViewCos            = 0.70f;  // cos(60 deg)
-    const int   kMinGoodFracPercent    = 60;     // % observations meeting geom checks
-    const int   kMinTemporalSpanFrames = 80;     // observation span requirement
-    const int   kMaxDescHamMean        = 40;     // ORB Hamming mean
-    const int   kMaxDescHamMax         = 60;     // ORB Hamming max
-    const double kMaxReprojErrPx       = 0.0;    // 0 disables reprojection check
+    const int   kMinObs                = 6;
+    const float kMinFoundRatio         = 0.90f;
+    const int   kMaxScaleLevelDiff     = 1;
+    const float kMinViewCos            = 0.70f;
+    const int   kMinGoodFracPercent    = 60;
+    const int   kMinTemporalSpanFrames = 80;
+    const int   kMaxDescHamMean        = 40;
+    const int   kMaxDescHamMax         = 60;
+    const double kMaxReprojErrPx       = 0.0;
     // ----------------------------
 
     // RANSAC + Fusion Thresholds
-    const double kRansacThresh       = 0.07;   // same as before (meters)
+    // kRansacThresh: relaxed 0.07->0.15m; RGB-D drift and depth noise make
+    //               7cm per-point precision unreachable in most pairs
+    // kRansacMinInliers: lowered 20->10; rely on pooled RANSAC for global validation
+    // kMinPointsPerPair: lowered 20->8; sparse pairs now feed the pooled stage
+    //                    instead of being discarded entirely
+    // kMinInlierRatio: slightly relaxed to match lower per-pair expectations
+    // kMinPairsForFusion: lowered 3->2; two consistent pairs are enough for pooling
+    const double kRansacThresh       = 0.15;
     const int    kRansacIters        = 2000;
-    const int    kRansacMinInliers   = 20;      // minimal to even consider an SE3
-    const int    kMinPointsPerPair   = 20;     // ignore small matches (N < this)
-    const double kMinInlierRatio     = 0.2;   // inliers / N
-    const int    kMinPairsForFusion  = 3;      // need at least this many KFs to fuse
+    const int    kRansacMinInliers   = 10;
+    const int    kMinPointsPerPair   = 8;
+    const double kMinInlierRatio     = 0.15;
+    const int    kMinPairsForFusion  = 2;
 
-    const double bow_floor_score = 0.02;  // was 0.03, too permissive
+    const double bow_floor_score = 0.02;
     const double bow_rel_cut    = 0.70;
     const bool printLog = false;
     // ----------------------------
