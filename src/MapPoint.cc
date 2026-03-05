@@ -186,7 +186,6 @@ KeyFrame* MapPoint::GetReferenceKeyFrame()
 void MapPoint::AddObservation(KeyFrame* pKF, size_t idx)
 {
     unique_lock<mutex> lock(mMutexFeatures);
-    mbQueuedForHq = false;
     if(mObservations.count(pKF))
         return;
     mObservations[pKF]=idx;

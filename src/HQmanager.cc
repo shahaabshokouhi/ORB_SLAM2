@@ -53,6 +53,8 @@ namespace {
         std::unordered_map<int, DBoW2::BowVector>         kf2bow;
         std::unordered_map<int, Candidate> best_pairs; // ref map kp, second map kp
         std::unordered_map<int, Pairs3D> point_pairs;
+        // reverse map: mpid -> set of kf_ids that currently hold it (for stale-entry cleanup)
+        std::unordered_map<int, std::unordered_set<int>> mpid2kfids;
 
         bool hasTransform = false;
         SE3  T_agent_to_local;
@@ -641,8 +643,8 @@ void HighQualityManager::Run()
         }
 
         // thresholds for the pooled refinement
-        const int kMinMatchedFramesForPool = 3;
-        const int kMinPoolSizeForRansac    = 100;
+        const int kMinMatchedFramesForPool = 2;
+        const int kMinPoolSizeForRansac    = 20;
 
         auto make_seed = [&](int a, int b, unsigned base=1337u){
             // stable-ish seed per pair
@@ -878,7 +880,8 @@ void HighQualityManager::Run()
                 // We want transform from other agent -> this agent
                 SE3 T_me_from_other = invert(T_other_from_me);
                 SE3 T_me_from_other_from_fuse = invert(T_other_from_me_from_fuse);
-                transformsToApply[otherName] = T_me_from_other;
+                // Use pooled RANSAC result when available; fall back to weighted fusion
+                transformsToApply[otherName] = usedPooled ? T_me_from_other : T_me_from_other_from_fuse;
 
                 // Debug: print Euler angles (in degrees)
                 const cv::Matx33d &R = T_me_from_other.R;
@@ -1290,6 +1293,36 @@ void HighQualityManager::ImportHighQualityMapPoints(
         // fill agent buckets (only if we have KF ids)
         int mpid = static_cast<int>(pSrcMP->mnId);
 
+        // Build the new set of kf_ids for this mpid
+        std::unordered_set<int> newKfIds(pSrcMP->mvnObservations.begin(),
+                                         pSrcMP->mvnObservations.end());
+
+        // Remove stale entries: kf_ids that previously held this mpid but are no longer in observations
+        auto prevIt = agentBucket.mpid2kfids.find(mpid);
+        if (prevIt != agentBucket.mpid2kfids.end()) {
+            for (int old_kf : prevIt->second) {
+                if (newKfIds.count(old_kf)) continue; // still present, no action needed
+                // Remove mpid from this stale kf bucket
+                auto itD = agentBucket.kf2descs.find(old_kf);
+                auto itP = agentBucket.kf2pts.find(old_kf);
+                auto itM = agentBucket.kf2mpids.find(old_kf);
+                if (itM == agentBucket.kf2mpids.end()) continue;
+                auto &vM = itM->second;
+                for (size_t i = 0; i < vM.size(); ++i) {
+                    if (vM[i] == mpid) {
+                        vM.erase(vM.begin() + i);
+                        if (itD != agentBucket.kf2descs.end()) itD->second.erase(itD->second.begin() + i);
+                        if (itP != agentBucket.kf2pts.end())   itP->second.erase(itP->second.begin() + i);
+                        updated_keyframes.insert(old_kf);
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Update the reverse map for this mpid
+        agentBucket.mpid2kfids[mpid] = newKfIds;
+
         for (int kf_id : pSrcMP->mvnObservations) {
 
             // we only insert if descriptor is valid; otherwise skip this MP for this KF
@@ -1327,7 +1360,7 @@ void HighQualityManager::ImportHighQualityMapPoints(
                 vM.push_back(mpid);
             }
 
-            // 4) quick consistency check: all 3 vectors for this kf_id must have same size
+            // quick consistency check: all 3 vectors for this kf_id must have same size
             if (!(vD.size() == vP.size() && vP.size() == vM.size())) {
                 std::cerr << "[HQManager] size mismatch for agent " << agent_name
                         << " KF " << kf_id
