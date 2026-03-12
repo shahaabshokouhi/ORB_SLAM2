@@ -44,8 +44,8 @@ namespace {
         std::vector<int> inliers;
         bool ok = false;
     };
-    struct EstSE3Weighted { SE3 T; int inliers=0;};
-    struct PairEst { KeyFrame* pkf; int kf2; RansacSE3 est; };
+    struct EstSE3Weighted { SE3 T; int inliers=0; double score=0.0; };
+    struct PairEst { KeyFrame* pkf; int kf2; RansacSE3 est; double bow_score=0.0; };
     struct AgentBuckets {
         std::unordered_map<int, std::vector<cv::Mat>>     kf2descs;
         std::unordered_map<int, std::vector<cv::Point3f>> kf2pts;
@@ -362,7 +362,7 @@ static SE3 fuse_transforms_weighted(const std::vector<EstSE3Weighted>& ests)
     double W = 0.0;
 
     for (const auto& e : ests) {
-        double w = std::max(1, e.inliers);
+        double w = std::max(1, e.inliers) * std::max(e.score, 0.01);
         cv::Vec4d q = matR_to_quat(e.T.R);
         
         // ensure same hemisphere to avoid cancellation
@@ -794,7 +794,7 @@ void HighQualityManager::Run()
 
                     // ACCEPTED pair
                     matchedFramesAfterRansac++;
-                    pair_ests.push_back({pkf, kf_other, r});
+                    pair_ests.push_back({pkf, kf_other, r, candidate.score});
 
                     // pool the INLIER correspondences for the second-stage RANSAC
                     poolP1.reserve(poolP1.size() + r.inliers.size());
@@ -872,6 +872,7 @@ void HighQualityManager::Run()
                         EstSE3Weighted e;
                         e.T       = pe.est.model;
                         e.inliers = (int)pe.est.inliers.size();
+                        e.score   = pe.bow_score;
                         ests.push_back(e);
                     }
                     T_other_from_me_from_fuse = fuse_transforms_weighted(ests);
