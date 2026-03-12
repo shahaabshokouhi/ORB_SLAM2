@@ -185,25 +185,29 @@ KeyFrame* MapPoint::GetReferenceKeyFrame()
 
 void MapPoint::AddObservation(KeyFrame* pKF, size_t idx)
 {
-    unique_lock<mutex> lock(mMutexFeatures);
-    if(mObservations.count(pKF))
-        return;
-    mObservations[pKF]=idx;
-    mbQueuedForHq = false;
+    bool shouldUpdateKFHQ = false;
+    {
+        unique_lock<mutex> lock(mMutexFeatures);
+        if(mObservations.count(pKF))
+            return;
+        mObservations[pKF]=idx;
+        mbQueuedForHq = false;
+        // Read HQ status under lock so the value is consistent.
+        shouldUpdateKFHQ = mbHighQaulity;
 
-    // If this point is already HQ, register it in the new KF immediately.
-    // ApplyToMapPoint only fires on status *changes*, so new KFs that observe
-    // an already-HQ point would otherwise never get their mvpHighQualityMapPoints
-    // populated, leaving GetHighQualityMapPoints() empty for those KFs.
-    if (mbHighQaulity) {
+        if(pKF->mvuRight[idx]>=0)
+            nObs+=2;
+        else
+            nObs++;
+    } // MP::mMutexFeatures released before touching the KF
+
+    // If this point is already HQ, register it in the new KF.
+    // Called outside the MapPoint mutex to avoid lock-order deadlock:
+    // AddHighQualityMapPoint acquires KF::mMutexFeatures, and other code
+    // paths hold KF::mMutexFeatures while trying to acquire MP::mMutexFeatures.
+    if (shouldUpdateKFHQ) {
         pKF->AddHighQualityMapPoint(this, idx);
     }
-
-    if(pKF->mvuRight[idx]>=0)
-        nObs+=2;
-    else
-        nObs++;
-
 }
 
 void MapPoint::EraseObservation(KeyFrame* pKF)
