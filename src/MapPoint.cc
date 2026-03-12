@@ -191,11 +191,19 @@ void MapPoint::AddObservation(KeyFrame* pKF, size_t idx)
     mObservations[pKF]=idx;
     mbQueuedForHq = false;
 
+    // If this point is already HQ, register it in the new KF immediately.
+    // ApplyToMapPoint only fires on status *changes*, so new KFs that observe
+    // an already-HQ point would otherwise never get their mvpHighQualityMapPoints
+    // populated, leaving GetHighQualityMapPoints() empty for those KFs.
+    if (mbHighQaulity) {
+        pKF->AddHighQualityMapPoint(this, idx);
+    }
+
     if(pKF->mvuRight[idx]>=0)
         nObs+=2;
     else
         nObs++;
-    
+
 }
 
 void MapPoint::EraseObservation(KeyFrame* pKF)

@@ -1314,7 +1314,14 @@ void HighQualityManager::ImportHighQualityMapPoints(
                         vM.erase(vM.begin() + i);
                         if (itD != agentBucket.kf2descs.end()) itD->second.erase(itD->second.begin() + i);
                         if (itP != agentBucket.kf2pts.end())   itP->second.erase(itP->second.begin() + i);
-                        updated_keyframes.insert(old_kf);
+                        // If the bucket for old_kf is now completely empty, remove its
+                        // stale BoW too — otherwise kf2bow[old_kf] keeps a non-empty BoW
+                        // and pairs with local KFs while kf2descs[old_kf] is empty (N=0).
+                        if (vM.empty()) {
+                            agentBucket.kf2bow.erase(old_kf);
+                        } else {
+                            updated_keyframes.insert(old_kf);
+                        }
                         break;
                     }
                 }
