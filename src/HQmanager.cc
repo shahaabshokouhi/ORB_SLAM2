@@ -90,14 +90,12 @@ namespace {
     // ----------------------------
 
     // RANSAC + Fusion Thresholds
-    // kRansacThresh: relaxed 0.07->0.15m; RGB-D drift and depth noise make
-    //               7cm per-point precision unreachable in most pairs
     // kRansacMinInliers: lowered 20->10; rely on pooled RANSAC for global validation
     // kMinPointsPerPair: lowered 20->8; sparse pairs now feed the pooled stage
     //                    instead of being discarded entirely
     // kMinInlierRatio: slightly relaxed to match lower per-pair expectations
     // kMinPairsForFusion: lowered 3->2; two consistent pairs are enough for pooling
-    const double kRansacThresh       = 0.15;
+    const double kRansacThresh       = 0.07;  // matches offline
     const int    kRansacIters        = 2000;
     const int    kRansacMinInliers   = 10;
     const int    kMinPointsPerPair   = 8;
@@ -106,7 +104,7 @@ namespace {
 
     const double bow_floor_score = 0.02;
     const double bow_rel_cut    = 0.70;
-    const bool printLog = false;
+    const bool printLog = true;
     // ----------------------------
 
 
@@ -192,51 +190,30 @@ static RansacSE3 estimate_se3_ransac(
 {
     RansacSE3 out;
     const int N = (int)P1.size();
-    if ((N < 3 || (int)P2.size() != N) && printLog) {
-        std::cout << "[RANSAC] early exit: N=" << N 
-                  << " P2.size=" << P2.size() << "\n";
+    if (N < 3 || (int)P2.size() != N) {
+        if (printLog) std::cout << "[RANSAC] early exit: N=" << N
+                                << " P2.size=" << P2.size() << "\n";
         return out;
     }
 
     std::mt19937 rng(seed);
-    std::uniform_int_distribution<int> uni(0, N-1); 
+    std::uniform_int_distribution<int> uni(0, N-1);
 
-    const int sample_k = (N >= 4) ? 4 : 3;
-    std::vector<int> idx(sample_k);
+    std::vector<int> idx(3);  // always 3 points, matches offline
 
     int best_inl = -1;
     SE3 best_T;
     std::vector<int> best_set;
 
-    const int early_good = std::max(minInliers, (int)(0.7*N));
-
     for (int it = 0; it < maxIters; ++it) {
-        // sample 3 distinct indices        
+        // sample 3 distinct indices
         for (;;) {
-            for(int k = 0; k < sample_k; ++k) idx[k] = uni(rng);
-
-            bool distinct = true;
-            for (int a = 0; a < sample_k && distinct; ++a) {
-                for (int b = a + 1; b < sample_k; ++b) {
-                    if (idx[a] == idx[b]) {
-                        distinct = false;
-                        break;
-                    }
-                }
-            }
-            if (distinct) break;
+            idx[0]=uni(rng); idx[1]=uni(rng); idx[2]=uni(rng);
+            if (idx[0]!=idx[1] && idx[0]!=idx[2] && idx[1]!=idx[2]) break;
         }
 
-
-        std::vector<cv::Point3f> sP(sample_k), sQ(sample_k);
-        for (int k=0; k<sample_k; ++k) {sP[k]=P1[idx[k]]; sQ[k]=P2[idx[k]];}
-        
-        // deneeracy check
-        if (!non_degenerate_3pt(sP[0], sP[1], sP[2]) ||
-            !non_degenerate_3pt(sQ[0], sQ[1], sQ[2]))
-        {
-            continue;
-        }
+        std::vector<cv::Point3f> sP(3), sQ(3);
+        for (int k=0; k<3; ++k) {sP[k]=P1[idx[k]]; sQ[k]=P2[idx[k]];}
 
         SE3 Tm;
         if (!umeyama_rigid(sP, sQ, Tm)) continue;
@@ -256,8 +233,6 @@ static RansacSE3 estimate_se3_ransac(
             best_inl = (int)inl.size();
             best_T = Tm;
             best_set = inl;
-
-            if (best_inl >= early_good) break;
         }
     }
 
@@ -274,8 +249,8 @@ static RansacSE3 estimate_se3_ransac(
 
     SE3 refit;
 
-    if (!umeyama_rigid(iP, iQ, refit) && printLog) {
-        std::cout << "[RANSAC] refit failed in Umeyama\n";
+    if (!umeyama_rigid(iP, iQ, refit)) {
+        if (printLog) std::cout << "[RANSAC] refit failed in Umeyama\n";
         return out;
     }
 
@@ -362,7 +337,7 @@ static SE3 fuse_transforms_weighted(const std::vector<EstSE3Weighted>& ests)
     double W = 0.0;
 
     for (const auto& e : ests) {
-        double w = std::max(1, e.inliers) * std::max(e.score, 0.01);
+        double w = std::max(1, e.inliers);
         cv::Vec4d q = matR_to_quat(e.T.R);
         
         // ensure same hemisphere to avoid cancellation
