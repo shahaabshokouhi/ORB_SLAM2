@@ -63,7 +63,7 @@ namespace {
 
 
     std::map<std::string, AgentBuckets> gAgentBuckets;
-    std::unordered_map<std::string, std::unordered_set<int>> nMpsPerAgent;
+    std::unordered_map<std::string, std::unordered_map<int, MapPoint*>> nMpsPerAgent;
     std::mutex gBucketsMx;
     std::unordered_map<int, std::vector<Candidate>> matched_frames;
     std::vector<PairEst> pair_ests;
@@ -1120,13 +1120,6 @@ void HighQualityManager::ExportMapPointDescriptorsCSV(const std::string& csv_pat
 {
     if (!mpMap) return;
 
-    // Use HQ points; switch to GetAllMapPoints() if you want everything
-    std::vector<MapPoint*> vMPs = mpMap->GetHighQualityMapPoints();
-    vMPs.erase(std::remove_if(vMPs.begin(), vMPs.end(),
-                              [](MapPoint* p){ return !p || p->isBad(); }),
-               vMPs.end());
-    if (vMPs.empty()) return;
-
     std::ofstream ofs(csv_path.c_str());
     if (!ofs.is_open()) {
         std::cerr << "[HQManager] Failed to open " << csv_path << " for writing.\n";
@@ -1134,59 +1127,134 @@ void HighQualityManager::ExportMapPointDescriptorsCSV(const std::string& csv_pat
     }
 
     ofs << std::fixed << std::setprecision(6);
-    // One row per MapPoint
-    // observations = "kfId;kfId;kfId;..."
-    ofs << "mp_id,mp_x,mp_y,mp_z,descriptor_hex,observations\n";
+    ofs << "agent_name,mp_id,mp_x,mp_y,mp_z,descriptor_hex,observations\n";
 
     size_t rows_written = 0;
 
-    for (MapPoint* pMP : vMPs) {
-        if (!pMP) continue;
-
-        // 3D position
-        cv::Mat Xw = pMP->GetWorldPos();  // 3x1, CV_32F
+    // Helper: write one MapPoint row.
+    // For host points, obs come from GetObservations() (KeyFrame* map).
+    // For received points, obs come from mvnObservations (vector<int>).
+    // Both are written as semicolon-separated integers in the observations column.
+    auto writeMP = [&](const std::string& agentName, MapPoint* pMP,
+                       const std::vector<int>& obs_ids) {
+        cv::Mat Xw = pMP->GetWorldPos();
         double X = 0.0, Y = 0.0, Z = 0.0;
         if (!Xw.empty() && Xw.rows >= 3 && Xw.cols >= 1) {
             X = static_cast<double>(Xw.at<float>(0));
             Y = static_cast<double>(Xw.at<float>(1));
             Z = static_cast<double>(Xw.at<float>(2));
         }
+        std::string hex = DescriptorRowToHex(pMP->GetDescriptor());
 
-        // Descriptor from MapPoint itself
-        std::string hex = DescriptorRowToHex(pMP->GetDescriptor()); // ensure forward decl/def exists
-
-        // Gather observing KeyFrame IDs (unique, sorted)
-        const std::map<KeyFrame*, size_t> obs = pMP->GetObservations();
-        if (obs.empty()) continue;
-
-        std::vector<long unsigned int> kf_ids;
-        kf_ids.reserve(obs.size());
-        for (const auto& kv : obs) {
-            KeyFrame* pKF = kv.first;
-            if (!pKF || pKF->isBad()) continue;
-            kf_ids.push_back(pKF->mnFrameId);
-        }
-        if (kf_ids.empty()) continue;
-        std::sort(kf_ids.begin(), kf_ids.end());
-        kf_ids.erase(std::unique(kf_ids.begin(), kf_ids.end()), kf_ids.end());
+        std::vector<int> sorted_ids = obs_ids;
+        std::sort(sorted_ids.begin(), sorted_ids.end());
+        sorted_ids.erase(std::unique(sorted_ids.begin(), sorted_ids.end()), sorted_ids.end());
 
         std::ostringstream obss;
-        for (size_t i = 0; i < kf_ids.size(); ++i) {
+        for (size_t i = 0; i < sorted_ids.size(); ++i) {
             if (i) obss << ';';
-            obss << kf_ids[i];
+            obss << sorted_ids[i];
         }
 
-        ofs << pMP->mnId << ","
+        ofs << agentName << ","
+            << pMP->mnId << ","
             << X << "," << Y << "," << Z << ","
             << "\"" << hex << "\","
             << "\"" << obss.str() << "\"\n";
-
         ++rows_written;
+    };
+
+    // --- Host HQ map points ---
+    std::vector<MapPoint*> vMPs = mpMap->GetHighQualityMapPoints();
+    vMPs.erase(std::remove_if(vMPs.begin(), vMPs.end(),
+                              [](MapPoint* p){ return !p || p->isBad(); }),
+               vMPs.end());
+
+    for (MapPoint* pMP : vMPs) {
+        if (!pMP) continue;
+
+        const std::map<KeyFrame*, size_t> obs = pMP->GetObservations();
+        if (obs.empty()) continue;
+
+        std::vector<int> obs_ids;
+        obs_ids.reserve(obs.size());
+        for (const auto& kv : obs) {
+            KeyFrame* pKF = kv.first;
+            if (!pKF || pKF->isBad()) continue;
+            obs_ids.push_back(static_cast<int>(pKF->mnFrameId));
+        }
+        if (obs_ids.empty()) continue;
+
+        writeMP(msAgentName, pMP, obs_ids);
     }
 
     ofs.close();
     std::cout << "[HQManager] Exported " << rows_written
-              << " MapPoints to " << csv_path << "\n";
+              << " host MapPoints to " << csv_path << "\n";
+
+    // --- Received agent map points (each agent gets its own file) ---
+    // Derive directory from csv_path (e.g. "Results/mappoint_descriptors.csv" → "Results/")
+    std::string dir;
+    {
+        size_t slash = csv_path.rfind('/');
+        if (slash != std::string::npos)
+            dir = csv_path.substr(0, slash + 1);
+    }
+
+    std::unique_lock<std::mutex> glock(gBucketsMx);
+    for (const auto& ka : nMpsPerAgent) {
+        const std::string& agentName = ka.first;
+        const std::string agent_csv = dir + agentName + "_mappoint_descriptors.csv";
+
+        std::ofstream aofs(agent_csv.c_str());
+        if (!aofs.is_open()) {
+            std::cerr << "[HQManager] Failed to open " << agent_csv << " for writing.\n";
+            continue;
+        }
+        aofs << std::fixed << std::setprecision(6);
+        aofs << "agent_name,mp_id,mp_x,mp_y,mp_z,descriptor_hex,observations\n";
+
+        size_t agent_rows = 0;
+        // Temporarily redirect writeMP output to aofs
+        auto writeAgentMP = [&](MapPoint* pMP, const std::vector<int>& obs_ids) {
+            cv::Mat Xw = pMP->GetWorldPos();
+            double X = 0.0, Y = 0.0, Z = 0.0;
+            if (!Xw.empty() && Xw.rows >= 3 && Xw.cols >= 1) {
+                X = static_cast<double>(Xw.at<float>(0));
+                Y = static_cast<double>(Xw.at<float>(1));
+                Z = static_cast<double>(Xw.at<float>(2));
+            }
+            std::string hex = DescriptorRowToHex(pMP->GetDescriptor());
+
+            std::vector<int> sorted_ids = obs_ids;
+            std::sort(sorted_ids.begin(), sorted_ids.end());
+            sorted_ids.erase(std::unique(sorted_ids.begin(), sorted_ids.end()), sorted_ids.end());
+
+            std::ostringstream obss;
+            for (size_t i = 0; i < sorted_ids.size(); ++i) {
+                if (i) obss << ';';
+                obss << sorted_ids[i];
+            }
+
+            aofs << agentName << ","
+                 << pMP->mnId << ","
+                 << X << "," << Y << "," << Z << ","
+                 << "\"" << hex << "\","
+                 << "\"" << obss.str() << "\"\n";
+            ++agent_rows;
+        };
+
+        for (const auto& kv : ka.second) {
+            MapPoint* pMP = kv.second;
+            if (!pMP || pMP->isBad()) continue;
+            if (pMP->mvnObservations.empty()) continue;
+            writeAgentMP(pMP, pMP->mvnObservations);
+        }
+
+        aofs.close();
+        std::cout << "[HQManager] Exported " << agent_rows
+                  << " MapPoints for agent " << agentName << " to " << agent_csv << "\n";
+    }
 }
 
 bool HighQualityManager::ComputeBowForKF(const ORBVocabulary* voc,
@@ -1215,11 +1283,20 @@ void HighQualityManager::ImportHighQualityMapPoints(
 
     std::unique_lock<std::mutex> glock(gBucketsMx);
     
+    auto& agentMpMap = nMpsPerAgent[agent_name];
     for (auto* MP : vMPs) {
+        int mpid = static_cast<int>(MP->mnId);
         if (MP->isBad() || !MP->mbHighQaulity) {
-            nMpsPerAgent[agent_name].erase(MP->mnId);
+            auto it = agentMpMap.find(mpid);
+            if (it != agentMpMap.end()) {
+                delete it->second;
+                agentMpMap.erase(it);
+            }
         } else {
-            nMpsPerAgent[agent_name].insert(MP->mnId);
+            auto it = agentMpMap.find(mpid);
+            if (it != agentMpMap.end() && it->second != MP)
+                delete it->second;  // free the stale pointer before replacing
+            agentMpMap[mpid] = MP;
         }
     }
 
