@@ -1127,7 +1127,7 @@ void HighQualityManager::ExportMapPointDescriptorsCSV(const std::string& csv_pat
     }
 
     ofs << std::fixed << std::setprecision(6);
-    ofs << "agent_name,mp_id,mp_x,mp_y,mp_z,descriptor_hex,observations\n";
+    ofs << "mp_id,mp_x,mp_y,mp_z,descriptor_hex,observations\n";
 
     size_t rows_written = 0;
 
@@ -1156,8 +1156,7 @@ void HighQualityManager::ExportMapPointDescriptorsCSV(const std::string& csv_pat
             obss << sorted_ids[i];
         }
 
-        ofs << agentName << ","
-            << pMP->mnId << ","
+        ofs << pMP->mnId << ","
             << X << "," << Y << "," << Z << ","
             << "\"" << hex << "\","
             << "\"" << obss.str() << "\"\n";
@@ -1212,7 +1211,7 @@ void HighQualityManager::ExportMapPointDescriptorsCSV(const std::string& csv_pat
             continue;
         }
         aofs << std::fixed << std::setprecision(6);
-        aofs << "agent_name,mp_id,mp_x,mp_y,mp_z,descriptor_hex,observations\n";
+        aofs << "mp_id,mp_x,mp_y,mp_z,descriptor_hex,observations\n";
 
         size_t agent_rows = 0;
         // Temporarily redirect writeMP output to aofs
@@ -1236,8 +1235,7 @@ void HighQualityManager::ExportMapPointDescriptorsCSV(const std::string& csv_pat
                 obss << sorted_ids[i];
             }
 
-            aofs << agentName << ","
-                 << pMP->mnId << ","
+            aofs << pMP->mnId << ","
                  << X << "," << Y << "," << Z << ","
                  << "\"" << hex << "\","
                  << "\"" << obss.str() << "\"\n";
