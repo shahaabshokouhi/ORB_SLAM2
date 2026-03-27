@@ -451,13 +451,14 @@ static Pairs3D build_3d_pairs_from_kf(
     P1v.reserve(vpMp.size());
 
     for (auto& pMp: vpMp) {
-        if (!pMp || pMp->isBad() || pMp->mDescriptor.empty()) continue;
+        if (!pMp || pMp->isBad()) continue;
 
-        cv::Mat d = pMp->mDescriptor;
+        cv::Mat d = pMp->GetDescriptor();  // locks mMutexFeatures, returns clone
 
+        if (d.empty()) continue;
         if (d.rows != 1) d = d.reshape(1, 1);           // force one row
         if (d.type() != CV_8U) d.convertTo(d, CV_8U);   // should already be CV_8U
-        D1v.push_back(d.clone());                       // clone to avoid aliasing
+        D1v.push_back(d);
 
         // 3D point in world
         // ORB-SLAM2 has `cv::Mat GetWorldPos()`
