@@ -104,7 +104,7 @@ namespace {
 
     const double bow_floor_score = 0.02;
     const double bow_rel_cut    = 0.70;
-    const bool printLog = true;
+    const bool printLog = false;
     // ----------------------------
 
 

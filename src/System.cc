@@ -95,7 +95,7 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
     mpLoopCloser = new LoopClosing(mpMap, mpKeyFrameDatabase, mpVocabulary, mSensor!=MONOCULAR, true);
     mptLoopClosing = new thread(&ORB_SLAM2::LoopClosing::Run, mpLoopCloser);
 
-    mpHQmanager = new HighQualityManager(mpMap, mpVocabulary, "observation", 1.0, msAgentName);
+    mpHQmanager = new HighQualityManager(mpMap, mpVocabulary, "observation", 10.0, msAgentName);
     mptHQmanager = new thread(&ORB_SLAM2::HighQualityManager::Run, mpHQmanager);
 
     //Initialize the Viewer thread and launch
