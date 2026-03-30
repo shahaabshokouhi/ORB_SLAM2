@@ -1280,174 +1280,145 @@ void HighQualityManager::ImportHighQualityMapPoints(
 {   
     if (agent_name == msAgentName) return;
 
-    std::unique_lock<std::mutex> glock(gBucketsMx);
-    
-    auto& agentMpMap = nMpsPerAgent[agent_name];
-    for (auto* MP : vMPs) {
-        int mpid = static_cast<int>(MP->mnId);
-        if (MP->isBad() || !MP->mbHighQaulity) {
-            auto it = agentMpMap.find(mpid);
-            if (it != agentMpMap.end()) {
-                delete it->second;
-                agentMpMap.erase(it);
-            }
-        } else {
-            auto it = agentMpMap.find(mpid);
-            if (it != agentMpMap.end() && it->second != MP)
-                delete it->second;  // free the stale pointer before replacing
-            agentMpMap[mpid] = MP;
-        }
-    }
-
-    std::cout << "Agent " << agent_name << " has "
-              << nMpsPerAgent[agent_name].size()
-              << " Map Points. \n";
-
-    // ==== PHASE 1: mutate buckets (WRITE LOCK) ====
-    
-    // per-agent storage in HQ manager
-    // std::vector<MapPoint*> &vAgentPoints = mImportedPointsByAgent[agent_name];
-    // per-agent “buckets” in this .cc
-    AgentBuckets &agentBucket = gAgentBuckets[agent_name];
-    // std::cout << "Importing " << vMPs.size() << " points from "
-    //           << agent_name << std::endl;
+    size_t agentMpCount = 0;
     std::unordered_set<int> updated_keyframes;
+    // Descriptor snapshots for BoW computation (taken under lock, computed outside)
+    std::unordered_map<int, std::vector<cv::Mat>> kf_descs_for_bow;
 
-    for (ORB_SLAM2::MapPoint* pSrcMP : vMPs) {
+    // ==== LOCK: all bucket mutations ====
+    {
+        std::unique_lock<std::mutex> glock(gBucketsMx);
 
-        if (!pSrcMP) {
-            std::cerr << "[HQManager] skipping null MapPoint from agent " << agent_name << "\n";
-            continue;
+        auto& agentMpMap = nMpsPerAgent[agent_name];
+        for (auto* MP : vMPs) {
+            int mpid = static_cast<int>(MP->mnId);
+            if (MP->isBad() || !MP->mbHighQaulity) {
+                auto it = agentMpMap.find(mpid);
+                if (it != agentMpMap.end()) {
+                    delete it->second;
+                    agentMpMap.erase(it);
+                }
+            } else {
+                auto it = agentMpMap.find(mpid);
+                if (it != agentMpMap.end() && it->second != MP)
+                    delete it->second;
+                agentMpMap[mpid] = MP;
+            }
         }
+        agentMpCount = agentMpMap.size();
 
-        // 1) check observations list
-        // if (pSrcMP->mvnObservations.empty()) {
-        //     // not fatal, but tell ourselves
-        //     std::cerr << "[HQManager] MapPoint " << pSrcMP->mnId
-        //             << " from agent " << agent_name
-        //             << " has no observation KF ids; skipping bucket fill.\n";
-        // }
+        AgentBuckets &agentBucket = gAgentBuckets[agent_name];
 
-        // 2) get world pos safely
-        cv::Mat X = pSrcMP->GetWorldPos();
-        bool hasPos = (!X.empty() && X.rows >= 3 && X.cols >= 1);
+        for (ORB_SLAM2::MapPoint* pSrcMP : vMPs) {
+            if (!pSrcMP) continue;
 
-        // 3) get descriptor safely
-        cv::Mat desc = pSrcMP->GetDescriptor();
-        bool hasDesc = (!desc.empty() && desc.rows == 1 && desc.cols == 32 && desc.type() == CV_8U);
-        if (!hasDesc) {
-            std::cerr << "[HQManager] MapPoint " << pSrcMP->mnId
-                    << " from agent " << agent_name
-                    << " has invalid descriptor; rows=" << desc.rows
-                    << " cols=" << desc.cols << " type=" << desc.type() << "\n";
-        }
+            cv::Mat X = pSrcMP->GetWorldPos();
+            bool hasPos = (!X.empty() && X.rows >= 3 && X.cols >= 1);
 
-        // fill agent buckets (only if we have KF ids)
-        int mpid = static_cast<int>(pSrcMP->mnId);
+            cv::Mat desc = pSrcMP->GetDescriptor();
+            bool hasDesc = (!desc.empty() && desc.rows == 1 && desc.cols == 32 && desc.type() == CV_8U);
+            if (!hasDesc) {
+                std::cerr << “[HQManager] MapPoint “ << pSrcMP->mnId
+                        << “ from agent “ << agent_name
+                        << “ has invalid descriptor; rows=” << desc.rows
+                        << “ cols=” << desc.cols << “ type=” << desc.type() << “\n”;
+            }
 
-        // Build the new set of kf_ids for this mpid
-        std::unordered_set<int> newKfIds(pSrcMP->mvnObservations.begin(),
-                                         pSrcMP->mvnObservations.end());
+            int mpid = static_cast<int>(pSrcMP->mnId);
+            std::unordered_set<int> newKfIds(pSrcMP->mvnObservations.begin(),
+                                             pSrcMP->mvnObservations.end());
 
-        // Remove stale entries: kf_ids that previously held this mpid but are no longer in observations
-        auto prevIt = agentBucket.mpid2kfids.find(mpid);
-        if (prevIt != agentBucket.mpid2kfids.end()) {
-            for (int old_kf : prevIt->second) {
-                if (newKfIds.count(old_kf)) continue; // still present, no action needed
-                // Remove mpid from this stale kf bucket
-                auto itD = agentBucket.kf2descs.find(old_kf);
-                auto itP = agentBucket.kf2pts.find(old_kf);
-                auto itM = agentBucket.kf2mpids.find(old_kf);
-                if (itM == agentBucket.kf2mpids.end()) continue;
-                auto &vM = itM->second;
-                for (size_t i = 0; i < vM.size(); ++i) {
-                    if (vM[i] == mpid) {
-                        vM.erase(vM.begin() + i);
-                        if (itD != agentBucket.kf2descs.end()) itD->second.erase(itD->second.begin() + i);
-                        if (itP != agentBucket.kf2pts.end())   itP->second.erase(itP->second.begin() + i);
-                        // If the bucket for old_kf is now completely empty, remove its
-                        // stale BoW too — otherwise kf2bow[old_kf] keeps a non-empty BoW
-                        // and pairs with local KFs while kf2descs[old_kf] is empty (N=0).
-                        if (vM.empty()) {
-                            agentBucket.kf2bow.erase(old_kf);
-                        } else {
-                            updated_keyframes.insert(old_kf);
+            auto prevIt = agentBucket.mpid2kfids.find(mpid);
+            if (prevIt != agentBucket.mpid2kfids.end()) {
+                for (int old_kf : prevIt->second) {
+                    if (newKfIds.count(old_kf)) continue;
+                    auto itD = agentBucket.kf2descs.find(old_kf);
+                    auto itP = agentBucket.kf2pts.find(old_kf);
+                    auto itM = agentBucket.kf2mpids.find(old_kf);
+                    if (itM == agentBucket.kf2mpids.end()) continue;
+                    auto &vM = itM->second;
+                    for (size_t i = 0; i < vM.size(); ++i) {
+                        if (vM[i] == mpid) {
+                            vM.erase(vM.begin() + i);
+                            if (itD != agentBucket.kf2descs.end()) itD->second.erase(itD->second.begin() + i);
+                            if (itP != agentBucket.kf2pts.end())   itP->second.erase(itP->second.begin() + i);
+                            if (vM.empty()) {
+                                agentBucket.kf2bow.erase(old_kf);
+                            } else {
+                                updated_keyframes.insert(old_kf);
+                            }
+                            break;
                         }
-                        break;
                     }
                 }
             }
-        }
 
-        // Update the reverse map for this mpid
-        agentBucket.mpid2kfids[mpid] = newKfIds;
+            agentBucket.mpid2kfids[mpid] = newKfIds;
 
-        for (int kf_id : pSrcMP->mvnObservations) {
+            for (int kf_id : pSrcMP->mvnObservations) {
+                if (!hasDesc || !hasPos) continue;
 
-            // we only insert if descriptor is valid; otherwise skip this MP for this KF
-            if (!hasDesc || !hasPos) {
-                continue;
-            }
+                auto &vD = agentBucket.kf2descs[kf_id];
+                auto &vP = agentBucket.kf2pts[kf_id];
+                auto &vM = agentBucket.kf2mpids[kf_id];
 
-            auto &vD = agentBucket.kf2descs[kf_id];
-            auto &vP = agentBucket.kf2pts[kf_id];
-            auto &vM = agentBucket.kf2mpids[kf_id];
-
-            // try to find existing entry with same mpid
-            int existing_idx = -1;
-            for (size_t i = 0; i < vM.size(); ++i) {
-                if (vM[i] == mpid) {
-                    existing_idx = static_cast<int>(i);
-                    break;
+                int existing_idx = -1;
+                for (size_t i = 0; i < vM.size(); ++i) {
+                    if (vM[i] == mpid) { existing_idx = static_cast<int>(i); break; }
                 }
+
+                cv::Point3f p{ X.at<float>(0), X.at<float>(1), X.at<float>(2) };
+
+                if (existing_idx >= 0) {
+                    desc.clone().copyTo(vD[existing_idx]);
+                    vP[existing_idx] = p;
+                } else {
+                    vD.push_back(desc.clone());
+                    vP.push_back(p);
+                    vM.push_back(mpid);
+                }
+
+                if (!(vD.size() == vP.size() && vP.size() == vM.size())) {
+                    std::cerr << “[HQManager] size mismatch for agent “ << agent_name
+                            << “ KF “ << kf_id << “ descs=” << vD.size()
+                            << “ pts=” << vP.size() << “ mpids=” << vM.size() << “\n”;
+                }
+
+                updated_keyframes.insert(kf_id);
             }
-
-            cv::Point3f p;
-            p.x = X.at<float>(0);
-            p.y = X.at<float>(1);
-            p.z = X.at<float>(2);
-
-            if (existing_idx >= 0) {
-                // REPLACE in-place
-                desc.clone().copyTo(vD[existing_idx]);
-                vP[existing_idx] = p;
-                // vM[existing_idx] already equals mpid
-            } else {
-                // NEW entry
-                vD.push_back(desc.clone());
-                vP.push_back(p);
-                vM.push_back(mpid);
-            }
-
-            // quick consistency check: all 3 vectors for this kf_id must have same size
-            if (!(vD.size() == vP.size() && vP.size() == vM.size())) {
-                std::cerr << "[HQManager] size mismatch for agent " << agent_name
-                        << " KF " << kf_id
-                        << " descs=" << vD.size()
-                        << " pts="   << vP.size()
-                        << " mpids=" << vM.size()
-                        << "\n";
-            }
-
-            updated_keyframes.insert(kf_id);
         }
 
+        // Snapshot descriptors needed for BoW — shallow cv::Mat copies are safe
+        // (ref-counted; data stays alive even if gAgentBuckets is later modified)
+        for (int kf_id : updated_keyframes) {
+            auto it = agentBucket.kf2descs.find(kf_id);
+            if (it != agentBucket.kf2descs.end())
+                kf_descs_for_bow[kf_id] = it->second;
+        }
+    }  // ==== gBucketsMx released ====
 
-        // finally, keep your old behavior: own a copy of the point
-        // ORB_SLAM2::MapPoint* pCopy = new ORB_SLAM2::MapPoint(*pSrcMP);
-        // pCopy->ReceivedFromOther(true);
-        // vAgentPoints.push_back(pCopy);
+    // Print outside the lock
+    std::cout << “Agent “ << agent_name << “ has “ << agentMpCount << “ Map Points. \n”;
+
+    // ==== BoW computation outside the lock ====
+    if (!mpVoc || kf_descs_for_bow.empty()) {
+        if (!mpVoc) std::cerr << “[HQManager] mpVoc null\n”;
+        return;
     }
 
-    // calculating bow vector for updated keyframes
-    if (!mpVoc) { std::cerr << "[HQManager] mpVoc null\n"; }
-    else {
-        for (int kf_id : updated_keyframes) {
-            const auto &descs = agentBucket.kf2descs[kf_id];
-            DBoW2::BowVector bow; DBoW2::FeatureVector feat;
-            if (ComputeBowForKF(mpVoc, descs, bow, &feat) && !bow.empty())
-                agentBucket.kf2bow[kf_id] = std::move(bow);
-        }
+    std::unordered_map<int, DBoW2::BowVector> new_bows;
+    for (auto& kv : kf_descs_for_bow) {
+        DBoW2::BowVector bow; DBoW2::FeatureVector feat;
+        if (ComputeBowForKF(mpVoc, kv.second, bow, &feat) && !bow.empty())
+            new_bows[kv.first] = std::move(bow);
+    }
+
+    // Write BoW results back under a short lock
+    {
+        std::unique_lock<std::mutex> glock(gBucketsMx);
+        AgentBuckets &agentBucket = gAgentBuckets[agent_name];
+        for (auto& kv : new_bows)
+            agentBucket.kf2bow[kv.first] = std::move(kv.second);
     }
 
 
