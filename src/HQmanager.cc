@@ -1318,10 +1318,10 @@ void HighQualityManager::ImportHighQualityMapPoints(
             cv::Mat desc = pSrcMP->GetDescriptor();
             bool hasDesc = (!desc.empty() && desc.rows == 1 && desc.cols == 32 && desc.type() == CV_8U);
             if (!hasDesc) {
-                std::cerr << “[HQManager] MapPoint “ << pSrcMP->mnId
-                        << “ from agent “ << agent_name
-                        << “ has invalid descriptor; rows=” << desc.rows
-                        << “ cols=” << desc.cols << “ type=” << desc.type() << “\n”;
+                std::cerr << "[HQManager] MapPoint " << pSrcMP->mnId
+                        << " from agent " << agent_name
+                        << " has invalid descriptor; rows=" << desc.rows
+                        << " cols=" << desc.cols << " type=" << desc.type() << "\n";
             }
 
             int mpid = static_cast<int>(pSrcMP->mnId);
@@ -1379,9 +1379,9 @@ void HighQualityManager::ImportHighQualityMapPoints(
                 }
 
                 if (!(vD.size() == vP.size() && vP.size() == vM.size())) {
-                    std::cerr << “[HQManager] size mismatch for agent “ << agent_name
-                            << “ KF “ << kf_id << “ descs=” << vD.size()
-                            << “ pts=” << vP.size() << “ mpids=” << vM.size() << “\n”;
+                    std::cerr << "[HQManager] size mismatch for agent " << agent_name
+                            << " KF " << kf_id << " descs=" << vD.size()
+                            << " pts=" << vP.size() << " mpids=" << vM.size() << "\n";
                 }
 
                 updated_keyframes.insert(kf_id);
@@ -1398,11 +1398,11 @@ void HighQualityManager::ImportHighQualityMapPoints(
     }  // ==== gBucketsMx released ====
 
     // Print outside the lock
-    std::cout << “Agent “ << agent_name << “ has “ << agentMpCount << “ Map Points. \n”;
+    std::cout << "Agent " << agent_name << " has " << agentMpCount << " Map Points. \n";
 
     // ==== BoW computation outside the lock ====
     if (!mpVoc || kf_descs_for_bow.empty()) {
-        if (!mpVoc) std::cerr << “[HQManager] mpVoc null\n”;
+        if (!mpVoc) std::cerr << "[HQManager] mpVoc null\n";
         return;
     }
 
