@@ -609,6 +609,14 @@ void HighQualityManager::Run()
         std::cout << "\nHost map point size: " << mapPoints.size() << std::endl;
         mapPoints.clear();
 
+        {
+            std::unique_lock<std::mutex> glock(gBucketsMx);
+            for (auto& ka: nMpsPerAgent) {
+
+                std::cout << "Agent " << ka.first << " has " << ka.second.size() << " Map Points. \n";
+            }
+        }
+
         // === OLD BLOCK REPLACED BY THIS ===
 
         // 1) Take a snapshot of the current buckets under a short lock
@@ -1305,7 +1313,6 @@ void HighQualityManager::ImportHighQualityMapPoints(
                 agentMpMap[mpid] = MP;
             }
         }
-        agentMpCount = agentMpMap.size();
 
         AgentBuckets &agentBucket = gAgentBuckets[agent_name];
 
@@ -1397,8 +1404,6 @@ void HighQualityManager::ImportHighQualityMapPoints(
         }
     }  // ==== gBucketsMx released ====
 
-    // Print outside the lock
-    std::cout << "Agent " << agent_name << " has " << agentMpCount << " Map Points. \n";
 
     // ==== BoW computation outside the lock ====
     if (!mpVoc || kf_descs_for_bow.empty()) {
