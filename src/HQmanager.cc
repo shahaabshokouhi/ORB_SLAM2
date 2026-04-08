@@ -547,6 +547,7 @@ void HighQualityManager::Run()
 {
     using namespace std::chrono;
     while (true) {
+      try {
 
         if (mDoScan.exchange(false)) {
             // placeholder
@@ -914,6 +915,11 @@ void HighQualityManager::Run()
                 }
             }
         }
+      } catch (const cv::Exception& e) {
+          std::cerr << "[HQmanager::Run] cv::Exception: " << e.what() << "\n";
+      } catch (const std::exception& e) {
+          std::cerr << "[HQmanager::Run] exception: " << e.what() << "\n";
+      }
     }
 }
 
