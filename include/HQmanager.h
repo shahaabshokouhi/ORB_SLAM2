@@ -44,7 +44,7 @@ public:
                      const std::vector<cv::Mat>& descs,
                      DBoW2::BowVector& bow,
                      DBoW2::FeatureVector* feat = nullptr);
-
+    vector<cv::Point3f> ExportMergedMap();
     std::string msAgentName;
     
 
