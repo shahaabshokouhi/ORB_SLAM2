@@ -96,7 +96,7 @@ namespace {
     //                    instead of being discarded entirely
     // kMinInlierRatio: slightly relaxed to match lower per-pair expectations
     // kMinPairsForFusion: lowered 3->2; two consistent pairs are enough for pooling
-    const double kRansacThresh       = 0.07;  // matches offline
+    const double kRansacThresh       = 0.05;  // matches offline
     const int    kRansacIters        = 2000;
     const int    kRansacMinInliers   = 10;
     const int    kMinPointsPerPair   = 8;
