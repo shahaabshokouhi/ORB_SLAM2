@@ -1,241 +1,298 @@
-The repository is now compatible with opencv 4.x
-# ORB-SLAM2
-**Authors:** [Raul Mur-Artal](http://webdiis.unizar.es/~raulmur/), [Juan D. Tardos](http://webdiis.unizar.es/~jdtardos/), [J. M. M. Montiel](http://webdiis.unizar.es/~josemari/) and [Dorian Galvez-Lopez](http://doriangalvez.com/) ([DBoW2](https://github.com/dorian3d/DBoW2))
+# Collaborative Multi-Robot ORB-SLAM2
 
-**13 Jan 2017**: OpenCV 3 and Eigen 3.3 are now supported.
+**High-quality map-point selection and HQ-BoW place recognition for robust multi-robot map merging.**
 
-**22 Dec 2016**: Added AR demo (see section 7).
+[![License: GPLv3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+[![Built on ORB-SLAM2](https://img.shields.io/badge/based%20on-ORB--SLAM2-orange.svg)](https://github.com/raulmur/ORB_SLAM2)
+[![C++11](https://img.shields.io/badge/C%2B%2B-11-blue.svg)]()
+[![OpenCV 4.x](https://img.shields.io/badge/OpenCV-4.x-green.svg)]()
 
-ORB-SLAM2 is a real-time SLAM library for **Monocular**, **Stereo** and **RGB-D** cameras that computes the camera trajectory and a sparse 3D reconstruction (in the stereo and RGB-D case with true scale). It is able to detect loops and relocalize the camera in real time. We provide examples to run the SLAM system in the [KITTI dataset](http://www.cvlibs.net/datasets/kitti/eval_odometry.php) as stereo or monocular, in the [TUM dataset](http://vision.in.tum.de/data/datasets/rgbd-dataset) as RGB-D or monocular, and in the [EuRoC dataset](http://projects.asl.ethz.ch/datasets/doku.php?id=kmavvisualinertialdatasets) as stereo or monocular. We also provide a ROS node to process live monocular, stereo or RGB-D streams. **The library can be compiled without ROS**. ORB-SLAM2 provides a GUI to change between a *SLAM Mode* and *Localization Mode*, see section 9 of this document.
+> This repository extends the open-source [ORB-SLAM2](https://github.com/raulmur/ORB_SLAM2) system into a
+> **collaborative multi-robot SLAM** framework. Multiple robots run visual SLAM independently and their maps
+> are merged into a single, globally consistent map through a place-recognition and geometric-registration
+> pipeline that operates on a compact set of **high-quality map points**.
 
-<a href="https://www.youtube.com/embed/ufvPS5wJAx0" target="_blank"><img src="http://img.youtube.com/vi/ufvPS5wJAx0/0.jpg" 
-alt="ORB-SLAM2" width="240" height="180" border="10" /></a>
-<a href="https://www.youtube.com/embed/T-9PYCKhDLM" target="_blank"><img src="http://img.youtube.com/vi/T-9PYCKhDLM/0.jpg" 
-alt="ORB-SLAM2" width="240" height="180" border="10" /></a>
-<a href="https://www.youtube.com/embed/kPwy8yA4CKM" target="_blank"><img src="http://img.youtube.com/vi/kPwy8yA4CKM/0.jpg" 
-alt="ORB-SLAM2" width="240" height="180" border="10" /></a>
+---
 
+## Table of Contents
+- [Overview](#overview)
+- [Key Contributions](#key-contributions)
+- [System Architecture](#system-architecture)
+- [Prerequisites](#prerequisites)
+- [Building](#building)
+- [Usage](#usage)
+  - [1. Record per-robot data](#1-record-per-robot-data)
+  - [2. Run single-robot SLAM](#2-run-single-robot-slam)
+  - [3. Run multiple robots](#3-run-multiple-robots)
+  - [4. Merge maps](#4-merge-maps)
+  - [5. Evaluate BoW vs HQ-BoW](#5-evaluate-bow-vs-hq-bow)
+- [Configuration](#configuration)
+- [Repository Structure](#repository-structure)
+- [Results](#results)
+- [Citation](#citation)
+- [Acknowledgements](#acknowledgements)
+- [License](#license)
 
-### Related Publications:
+---
 
-[Monocular] Raúl Mur-Artal, J. M. M. Montiel and Juan D. Tardós. **ORB-SLAM: A Versatile and Accurate Monocular SLAM System**. *IEEE Transactions on Robotics,* vol. 31, no. 5, pp. 1147-1163, 2015. (**2015 IEEE Transactions on Robotics Best Paper Award**). **[PDF](http://webdiis.unizar.es/~raulmur/MurMontielTardosTRO15.pdf)**.
+## Overview
 
-[Stereo and RGB-D] Raúl Mur-Artal and Juan D. Tardós. **ORB-SLAM2: an Open-Source SLAM System for Monocular, Stereo and RGB-D Cameras**. *IEEE Transactions on Robotics,* vol. 33, no. 5, pp. 1255-1262, 2017. **[PDF](https://128.84.21.199/pdf/1610.06475.pdf)**.
+Single-robot visual SLAM is limited by the area one platform can observe in bounded time. In multi-robot
+missions (search-and-rescue, inspection, warehouse automation), several robots explore overlapping regions
+and must fuse their partial maps into one coherent representation — **without** a shared clock, a common
+starting frame, or a central tracker.
 
-[DBoW2 Place Recognizer] Dorian Gálvez-López and Juan D. Tardós. **Bags of Binary Words for Fast Place Recognition in Image Sequences**. *IEEE Transactions on Robotics,* vol. 28, no. 5, pp.  1188-1197, 2012. **[PDF](http://doriangalvez.com/php/dl.php?dlp=GalvezTRO12.pdf)**
+This framework addresses that problem in three parts:
 
-# 1. License
+1. Each robot runs a standard **ORB-SLAM2** RGB-D front-end/back-end and continuously identifies its most
+   reliable landmarks (**high-quality map points**).
+2. A **place-recognition** stage finds candidate keyframe correspondences *across* robots using a
+   Bag-of-Words scheme restricted to high-quality landmarks (**HQ-BoW**).
+3. A **geometric registration** stage recovers the rigid transform between maps from 3D–3D landmark
+   correspondences and fuses them into a single global map.
 
-ORB-SLAM2 is released under a [GPLv3 license](https://github.com/raulmur/ORB_SLAM2/blob/master/License-gpl.txt). For a list of all code/library dependencies (and associated licenses), please see [Dependencies.md](https://github.com/raulmur/ORB_SLAM2/blob/master/Dependencies.md).
+The system has been **validated in real-world multi-robot experiments** and is additionally being
+benchmarked in simulation (NVIDIA Isaac Sim) against GPU-accelerated stereo-VIO baselines.
 
-For a closed-source version of ORB-SLAM2 for commercial purposes, please contact the authors: orbslam (at) unizar (dot) es.
+---
 
-If you use ORB-SLAM2 (Monocular) in an academic work, please cite:
+## Key Contributions
 
-    @article{murTRO2015,
-      title={{ORB-SLAM}: a Versatile and Accurate Monocular {SLAM} System},
-      author={Mur-Artal, Ra\'ul, Montiel, J. M. M. and Tard\'os, Juan D.},
-      journal={IEEE Transactions on Robotics},
-      volume={31},
-      number={5},
-      pages={1147--1163},
-      doi = {10.1109/TRO.2015.2463671},
-      year={2015}
-     }
+### 1. High-Quality Map-Point Manager (`HighQualityManager`)
+A dedicated background module (`include/HQmanager.h`) that continuously scores each map point and flags a
+compact subset as **high quality** according to a selectable criterion:
 
-if you use ORB-SLAM2 (Stereo or RGB-D) in an academic work, please cite:
+- `observation` — landmarks with many keyframe observations (well-triangulated, persistent), or
+- `ba` — landmarks that survive/benefit most from local bundle adjustment.
 
-    @article{murORB2,
-      title={{ORB-SLAM2}: an Open-Source {SLAM} System for Monocular, Stereo and {RGB-D} Cameras},
-      author={Mur-Artal, Ra\'ul and Tard\'os, Juan D.},
-      journal={IEEE Transactions on Robotics},
-      volume={33},
-      number={5},
-      pages={1255--1262},
-      doi = {10.1109/TRO.2017.2705103},
-      year={2017}
-     }
+Only high-quality points are exported and exchanged between robots, which reduces communication and memory
+overhead and makes cross-robot matching far more robust to outliers.
 
-# 2. Prerequisites
-We have tested the library in **Ubuntu 12.04**, **14.04** and **16.04**, but it should be easy to compile in other platforms. A powerful computer (e.g. i7) will ensure real-time performance and provide more stable and accurate results.
+### 2. HQ-BoW Place Recognition
+Standard DBoW2 builds Bag-of-Words vectors from *all* features. **HQ-BoW** builds them from high-quality
+landmarks only, yielding more discriminative descriptors for **inter-robot loop detection** (finding where
+two robots' maps overlap). The improvement is quantified against vanilla BoW in
+`Results/eval_bow_vs_hqbow.py` (precision, recall, recall@k, and TP/FP/TN/FN confusion against ground truth).
 
-## C++11 or C++0x Compiler
-We use the new thread and chrono functionalities of C++11.
+### 3. Rigid Map Merging (`Examples/MapMerger/merg_maps.cc`)
+Given two robots' exported maps, the merger:
+1. computes (HQ-)BoW vectors per keyframe and proposes candidate cross-robot keyframe pairs,
+2. establishes **3D–3D map-point correspondences** for each candidate pair, and
+3. estimates the inter-map **rigid transform (SE(3))** with RANSAC (metric RGB-D maps → SE(3), no scale
+   ambiguity), then fuses the maps into a common reference frame.
 
-## Pangolin
-We use [Pangolin](https://github.com/stevenlovegrove/Pangolin) for visualization and user interface. Dowload and install instructions can be found at: https://github.com/stevenlovegrove/Pangolin.
+Default registration parameters: descriptor ratio `0.9`, max Hamming distance `60`, RANSAC inlier
+threshold `0.07 m`, minimum `20` inliers, `1000` iterations.
 
-## OpenCV
-We use [OpenCV](http://opencv.org) to manipulate images and features. Dowload and install instructions can be found at: http://opencv.org. **Required at leat 2.4.3. Tested with OpenCV 2.4.11 and OpenCV 3.2**.
+---
 
-## Eigen3
-Required by g2o (see below). Download and install instructions can be found at: http://eigen.tuxfamily.org. **Required at least 3.1.0**.
+## System Architecture
 
-## DBoW2 and g2o (Included in Thirdparty folder)
-We use modified versions of the [DBoW2](https://github.com/dorian3d/DBoW2) library to perform place recognition and [g2o](https://github.com/RainerKuemmerle/g2o) library to perform non-linear optimizations. Both modified libraries (which are BSD) are included in the *Thirdparty* folder.
-
-## ROS (optional)
-We provide some examples to process the live input of a monocular, stereo or RGB-D camera using [ROS](ros.org). Building these examples is optional. In case you want to use ROS, a version Hydro or newer is needed.
-
-# 3. Building ORB-SLAM2 library and examples
-
-Clone the repository:
 ```
-git clone https://github.com/raulmur/ORB_SLAM2.git ORB_SLAM2
+   Robot 0                         Robot 1                        Robot N
+ ┌──────────┐                    ┌──────────┐                   ┌──────────┐
+ │ RGB-D in │                    │ RGB-D in │        ...        │ RGB-D in │
+ └────┬─────┘                    └────┬─────┘                   └────┬─────┘
+      │                               │                              │
+ ┌────▼───────────┐            ┌──────▼─────────┐            ┌───────▼────────┐
+ │  ORB-SLAM2     │            │  ORB-SLAM2     │            │  ORB-SLAM2     │
+ │  front + back  │            │  front + back  │            │  front + back  │
+ └────┬───────────┘            └──────┬─────────┘            └───────┬────────┘
+      │  HighQualityManager           │  HighQualityManager          │
+      │  (scores + exports HQ pts)    │                              │
+      └───────────────┬───────────────┴──────────────┬───────────────┘
+                      │   per-robot HQ map points     │
+                      ▼                               ▼
+             ┌───────────────────────────────────────────────┐
+             │           Map Merger (merg_maps)              │
+             │  (HQ-)BoW candidate KF pairs                  │
+             │        → 3D–3D correspondences                │
+             │        → RANSAC SE(3) registration            │
+             │        → fused global map                     │
+             └───────────────────────────────────────────────┘
 ```
 
-We provide a script `build.sh` to build the *Thirdparty* libraries and *ORB-SLAM2*. Please make sure you have installed all required dependencies (see section 2). Execute:
-```
+---
+
+## Prerequisites
+
+Tested on Ubuntu 20.04/22.04. This fork is compatible with **OpenCV 4.x**.
+
+| Dependency | Notes |
+|-----------|-------|
+| C++11 compiler | uses `std::thread` / `std::chrono` |
+| [Pangolin](https://github.com/stevenlovegrove/Pangolin) | visualization / GUI |
+| [OpenCV](https://opencv.org) | **4.x** (image handling & features) |
+| [Eigen3](http://eigen.tuxfamily.org) | ≥ 3.1.0 (required by g2o) |
+| DBoW2, g2o | **bundled** in `Thirdparty/` (BSD) |
+| [librealsense2](https://github.com/IntelRealSense/librealsense) | for live/recording with Intel RealSense (RGB-D examples) |
+| ROS (optional) | for the ROS nodes under `Examples/ROS` |
+
+---
+
+## Building
+
+```bash
+git clone https://github.com/shahaabshokouhi/ORB_SLAM2.git
 cd ORB_SLAM2
 chmod +x build.sh
 ./build.sh
 ```
 
-This will create **libORB_SLAM2.so**  at *lib* folder and the executables **mono_tum**, **mono_kitti**, **rgbd_tum**, **stereo_kitti**, **mono_euroc** and **stereo_euroc** in *Examples* folder.
+`build.sh` compiles the bundled Thirdparty libraries (DBoW2, g2o), uncompresses the ORB vocabulary, and
+builds `libORB_SLAM2.so` plus all example executables (including `recorder_rgbd`, `rgbd_offline`,
+`rgbd_live`, `multi_cam_rgbd`, and `merg_maps`).
 
-# 4. Monocular Examples
+To build the ROS nodes (optional):
 
-## TUM Dataset
-
-1. Download a sequence from http://vision.in.tum.de/data/datasets/rgbd-dataset/download and uncompress it.
-
-2. Execute the following command. Change `TUMX.yaml` to TUM1.yaml,TUM2.yaml or TUM3.yaml for freiburg1, freiburg2 and freiburg3 sequences respectively. Change `PATH_TO_SEQUENCE_FOLDER`to the uncompressed sequence folder.
-```
-./Examples/Monocular/mono_tum Vocabulary/ORBvoc.txt Examples/Monocular/TUMX.yaml PATH_TO_SEQUENCE_FOLDER
-```
-
-## KITTI Dataset  
-
-1. Download the dataset (grayscale images) from http://www.cvlibs.net/datasets/kitti/eval_odometry.php 
-
-2. Execute the following command. Change `KITTIX.yaml`by KITTI00-02.yaml, KITTI03.yaml or KITTI04-12.yaml for sequence 0 to 2, 3, and 4 to 12 respectively. Change `PATH_TO_DATASET_FOLDER` to the uncompressed dataset folder. Change `SEQUENCE_NUMBER` to 00, 01, 02,.., 11. 
-```
-./Examples/Monocular/mono_kitti Vocabulary/ORBvoc.txt Examples/Monocular/KITTIX.yaml PATH_TO_DATASET_FOLDER/dataset/sequences/SEQUENCE_NUMBER
+```bash
+export ROS_PACKAGE_PATH=${ROS_PACKAGE_PATH}:$(pwd)/Examples/ROS
+chmod +x build_ros.sh
+./build_ros.sh
 ```
 
-## EuRoC Dataset
+---
 
-1. Download a sequence (ASL format) from http://projects.asl.ethz.ch/datasets/doku.php?id=kmavvisualinertialdatasets
+## Usage
 
-2. Execute the following first command for V1 and V2 sequences, or the second command for MH sequences. Change PATH_TO_SEQUENCE_FOLDER and SEQUENCE according to the sequence you want to run.
-```
-./Examples/Monocular/mono_euroc Vocabulary/ORBvoc.txt Examples/Monocular/EuRoC.yaml PATH_TO_SEQUENCE_FOLDER/mav0/cam0/data Examples/Monocular/EuRoC_TimeStamps/SEQUENCE.txt 
-```
+The RGB-D examples use the Intel RealSense settings file `Examples/RGB-D/realsense.yaml`
+(**adjust the intrinsics to your camera**).
 
-```
-./Examples/Monocular/mono_euroc Vocabulary/ORBvoc.txt Examples/Monocular/EuRoC.yaml PATH_TO_SEQUENCE/cam0/data Examples/Monocular/EuRoC_TimeStamps/SEQUENCE.txt 
-```
+### 1. Record per-robot data
+Capture an RGB-D sequence for one robot/station:
 
-# 5. Stereo Examples
-
-## KITTI Dataset
-
-1. Download the dataset (grayscale images) from http://www.cvlibs.net/datasets/kitti/eval_odometry.php 
-
-2. Execute the following command. Change `KITTIX.yaml`to KITTI00-02.yaml, KITTI03.yaml or KITTI04-12.yaml for sequence 0 to 2, 3, and 4 to 12 respectively. Change `PATH_TO_DATASET_FOLDER` to the uncompressed dataset folder. Change `SEQUENCE_NUMBER` to 00, 01, 02,.., 11. 
-```
-./Examples/Stereo/stereo_kitti Vocabulary/ORBvoc.txt Examples/Stereo/KITTIX.yaml PATH_TO_DATASET_FOLDER/dataset/sequences/SEQUENCE_NUMBER
+```bash
+./Examples/recorder_rgbd ./record_data/station_1
+# helper: ./record_rgbd.sh
 ```
 
-## EuRoC Dataset
+### 2. Run single-robot SLAM
 
-1. Download a sequence (ASL format) from http://projects.asl.ethz.ch/datasets/doku.php?id=kmavvisualinertialdatasets
+**Offline** (on recorded data):
 
-2. Execute the following first command for V1 and V2 sequences, or the second command for MH sequences. Change PATH_TO_SEQUENCE_FOLDER and SEQUENCE according to the sequence you want to run.
-```
-./Examples/Stereo/stereo_euroc Vocabulary/ORBvoc.txt Examples/Stereo/EuRoC.yaml PATH_TO_SEQUENCE/mav0/cam0/data PATH_TO_SEQUENCE/mav0/cam1/data Examples/Stereo/EuRoC_TimeStamps/SEQUENCE.txt
-```
-```
-./Examples/Stereo/stereo_euroc Vocabulary/ORBvoc.txt Examples/Stereo/EuRoC.yaml PATH_TO_SEQUENCE/cam0/data PATH_TO_SEQUENCE/cam1/data Examples/Stereo/EuRoC_TimeStamps/SEQUENCE.txt
+```bash
+./Examples/rgbd_offline Vocabulary/ORBvoc.txt Examples/RGB-D/realsense.yaml ./record_data/agent_0
+# helper: ./offline_rgbd.sh
 ```
 
-# 6. RGB-D Example
+**Live** (from a connected RealSense camera):
 
-## TUM Dataset
+```bash
+export REALSENSE_CONFIG=/absolute/path/to/Examples/RGB-D/realsense.yaml
+./live_rgbd.sh
+# runs: ./Examples/rgbd_live Vocabulary/ORBvoc.txt "$REALSENSE_CONFIG"
+```
 
-1. Download a sequence from http://vision.in.tum.de/data/datasets/rgbd-dataset/download and uncompress it.
+Each run's `HighQualityManager` exports the robot's high-quality map-point descriptors to a CSV
+(e.g. `Results/results_agent_0/mappoint_descriptors.csv`) for later merging.
 
-2. Associate RGB images and depth images using the python script [associate.py](http://vision.in.tum.de/data/datasets/rgbd-dataset/tools). We already provide associations for some of the sequences in *Examples/RGB-D/associations/*. You can generate your own associations file executing:
+### 3. Run multiple robots
 
-  ```
-  python associate.py PATH_TO_SEQUENCE/rgb.txt PATH_TO_SEQUENCE/depth.txt > associations.txt
-  ```
+```bash
+./Examples/multi_cam_rgbd Vocabulary/ORBvoc.txt Examples/RGB-D/realsense.yaml
+# helper: ./multi_cam_rgbd.sh
+```
 
-3. Execute the following command. Change `TUMX.yaml` to TUM1.yaml,TUM2.yaml or TUM3.yaml for freiburg1, freiburg2 and freiburg3 sequences respectively. Change `PATH_TO_SEQUENCE_FOLDER`to the uncompressed sequence folder. Change `ASSOCIATIONS_FILE` to the path to the corresponding associations file.
+### 4. Merge maps
+With per-robot exports present (`Results/results_agent_0/mappoint_descriptors.csv`,
+`Results/results_agent_1/mappoint_descriptors.csv`), run the merger:
 
-  ```
-  ./Examples/RGB-D/rgbd_tum Vocabulary/ORBvoc.txt Examples/RGB-D/TUMX.yaml PATH_TO_SEQUENCE_FOLDER ASSOCIATIONS_FILE
-  ```
+```bash
+./Examples/merg_maps
+```
 
-# 7. ROS Examples
+It loads the two robots' maps, computes (HQ-)BoW candidates, estimates the inter-map SE(3) transform via
+RANSAC, and writes the fused map/trajectory for visualization (`Results/plot_merged.py`,
+`Results/plot_map_trajectory.py`).
 
-### Building the nodes for mono, monoAR, stereo and RGB-D
-1. Add the path including *Examples/ROS/ORB_SLAM2* to the ROS_PACKAGE_PATH environment variable. Open .bashrc file and add at the end the following line. Replace PATH by the folder where you cloned ORB_SLAM2:
+### 5. Evaluate BoW vs HQ-BoW
 
-  ```
-  export ROS_PACKAGE_PATH=${ROS_PACKAGE_PATH}:PATH/ORB_SLAM2/Examples/ROS
-  ```
-  
-2. Execute `build_ros.sh` script:
+```bash
+cd Results
+python3 eval_bow_vs_hqbow.py
+```
 
-  ```
-  chmod +x build_ros.sh
-  ./build_ros.sh
-  ```
-  
-### Running Monocular Node
-For a monocular input from topic `/camera/image_raw` run node ORB_SLAM2/Mono. You will need to provide the vocabulary file and a settings file. See the monocular examples above.
+Reads the exported matches (`bow_vs_hqbow_matches.csv`) and ground truth (KITTI `NN.txt` or `poses.csv`) and
+produces precision/recall, recall@k, and confusion metrics plus plots.
 
-  ```
-  rosrun ORB_SLAM2 Mono PATH_TO_VOCABULARY PATH_TO_SETTINGS_FILE
-  ```
-  
-### Running Monocular Augmented Reality Demo
-This is a demo of augmented reality where you can use an interface to insert virtual cubes in planar regions of the scene.
-The node reads images from topic `/camera/image_raw`.
+---
 
-  ```
-  rosrun ORB_SLAM2 MonoAR PATH_TO_VOCABULARY PATH_TO_SETTINGS_FILE
-  ```
-  
-### Running Stereo Node
-For a stereo input from topic `/camera/left/image_raw` and `/camera/right/image_raw` run node ORB_SLAM2/Stereo. You will need to provide the vocabulary file and a settings file. If you **provide rectification matrices** (see Examples/Stereo/EuRoC.yaml example), the node will recitify the images online, **otherwise images must be pre-rectified**.
+## Configuration
 
-  ```
-  rosrun ORB_SLAM2 Stereo PATH_TO_VOCABULARY PATH_TO_SETTINGS_FILE ONLINE_RECTIFICATION
-  ```
-  
-**Example**: Download a rosbag (e.g. V1_01_easy.bag) from the EuRoC dataset (http://projects.asl.ethz.ch/datasets/doku.php?id=kmavvisualinertialdatasets). Open 3 tabs on the terminal and run the following command at each tab:
-  ```
-  roscore
-  ```
-  
-  ```
-  rosrun ORB_SLAM2 Stereo Vocabulary/ORBvoc.txt Examples/Stereo/EuRoC.yaml true
-  ```
-  
-  ```
-  rosbag play --pause V1_01_easy.bag /cam0/image_raw:=/camera/left/image_raw /cam1/image_raw:=/camera/right/image_raw
-  ```
-  
-Once ORB-SLAM2 has loaded the vocabulary, press space in the rosbag tab. Enjoy!. Note: a powerful computer is required to run the most exigent sequences of this dataset.
+- **Camera settings:** `Examples/RGB-D/realsense.yaml` — intrinsics (`Camera.fx/fy/cx/cy`), resolution,
+  fps, depth scale, and ORB extractor parameters. Update these to match your sensor.
+- **`REALSENSE_CONFIG`** (env var): absolute path to the YAML used by the live example.
+- **HQ criterion:** `observation` or `ba`, selected when constructing `HighQualityManager`.
+- **Merger parameters:** ratio / max-Hamming / RANSAC threshold / inliers / iterations at the top of
+  `Examples/MapMerger/merg_maps.cc`.
 
-### Running RGB_D Node
-For an RGB-D input from topics `/camera/rgb/image_raw` and `/camera/depth_registered/image_raw`, run node ORB_SLAM2/RGBD. You will need to provide the vocabulary file and a settings file. See the RGB-D example above.
+---
 
-  ```
-  rosrun ORB_SLAM2 RGBD PATH_TO_VOCABULARY PATH_TO_SETTINGS_FILE
-  ```
-  
-# 8. Processing your own sequences
-You will need to create a settings file with the calibration of your camera. See the settings file provided for the TUM and KITTI datasets for monocular, stereo and RGB-D cameras. We use the calibration model of OpenCV. See the examples to learn how to create a program that makes use of the ORB-SLAM2 library and how to pass images to the SLAM system. Stereo input must be synchronized and rectified. RGB-D input must be synchronized and depth registered.
+## Repository Structure
 
-# 9. SLAM and Localization Modes
-You can change between the *SLAM* and *Localization mode* using the GUI of the map viewer.
+```
+include/HQmanager.h            High-quality map-point manager (novel)
+Examples/MapMerger/merg_maps.cc   Cross-robot map merger: (HQ-)BoW + 3D–3D RANSAC SE(3) (novel)
+Examples/multi_cam_rgbd/       Multi-robot RGB-D pipeline (novel)
+Examples/rgbd_live, rgbd_offline, recorder_rgbd   RGB-D capture/run tools
+Results/eval_bow_vs_hqbow.py   BoW vs HQ-BoW evaluation (novel)
+Results/plot_*.py, room_coverage.py   Analysis & plotting utilities
+src/, include/                 Core ORB-SLAM2 (with modifications)
+Thirdparty/                    DBoW2, g2o (bundled)
+Vocabulary/                    ORB vocabulary
+GT/                            KITTI ground-truth poses (00–10)
+```
 
-### SLAM Mode
-This is the default mode. The system runs in parallal three threads: Tracking, Local Mapping and Loop Closing. The system localizes the camera, builds new map and tries to close loops.
+---
 
-### Localization Mode
-This mode can be used when you have a good map of your working area. In this mode the Local Mapping and Loop Closing are deactivated. The system localizes the camera in the map (which is no longer updated), using relocalization if needed. 
+## Results
 
+<!-- TODO: add quantitative tables and qualitative figures. Suggested content:
+     - HQ-BoW vs BoW: precision/recall and recall@k table (from eval_bow_vs_hqbow.py)
+     - Merged-map figure (Results/plot_merged.py) with per-robot trajectories overlaid
+     - Real-world multi-robot experiment: setup photo + fused map
+     - Runtime / memory: full map vs high-quality subset -->
+
+Real-world multi-robot experiments confirm that exchanging only high-quality map points yields accurate
+inter-robot registration while substantially reducing the data shared between robots. Quantitative tables
+and figures are provided in `Results/`.
+
+---
+
+## Citation
+
+If you use this framework in academic work, please cite the accompanying thesis/paper:
+
+```bibtex
+@phdthesis{shokouhi_multirobot_slam,
+  title  = {Collaborative Multi-Robot Visual SLAM with High-Quality Map-Point Selection},
+  author = {Shokouhi, Shahab},
+  school = {TODO: University},
+  year   = {TODO}
+}
+```
+
+<!-- TODO: replace with your final thesis/paper citation. -->
+
+As this work builds on ORB-SLAM2, please also cite the original papers listed in
+[Acknowledgements](#acknowledgements).
+
+---
+
+## Acknowledgements
+
+This project is built upon **ORB-SLAM2** by Raúl Mur-Artal, Juan D. Tardós, J. M. M. Montiel, and
+Dorian Gálvez-López, and uses the **DBoW2** and **g2o** libraries.
+
+- Mur-Artal, Montiel, Tardós. *ORB-SLAM: A Versatile and Accurate Monocular SLAM System.* IEEE T-RO, 2015.
+- Mur-Artal, Tardós. *ORB-SLAM2: an Open-Source SLAM System for Monocular, Stereo and RGB-D Cameras.*
+  IEEE T-RO, 2017.
+- Gálvez-López, Tardós. *Bags of Binary Words for Fast Place Recognition in Image Sequences.* IEEE T-RO, 2012.
+
+---
+
+## License
+
+This repository inherits the **GPLv3** license of ORB-SLAM2 (see [`LICENSE.txt`](LICENSE.txt) and
+[`License-gpl.txt`](License-gpl.txt)). New contributions in this fork are released under the same license.
+For commercial licensing of the original ORB-SLAM2 components, contact the original authors.
