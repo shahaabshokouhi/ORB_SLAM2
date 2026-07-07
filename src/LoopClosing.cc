@@ -121,17 +121,35 @@ bool LoopClosing::DetectLoop()
     // Compute reference BoW similarity score
     // This is the lowest score to a connected keyframe in the covisibility graph
     // We will impose loop candidates to have a higher similarity than this
+    //
+    // IMPORTANT: use the SAME vectors here as DetectLoopCandidates uses for
+    // candidate scoring. HQ BoW vectors are built from the sparse HQ point
+    // subset, so their scores run systematically lower than full-BoW scores;
+    // a minScore computed from full BoW would reject nearly every HQ-scored
+    // candidate.
     const vector<KeyFrame*> vpConnectedKeyFrames = mpCurrentKF->GetVectorCovisibleKeyFrames();
     const DBoW2::BowVector &CurrentBowVec = mpCurrentKF->mBowVec;
+    const DBoW2::BowVector CurrentHQBowVec = mpCurrentKF->GetHQBoWVec();
+    const bool bCurrentHasHQ = mbUseHQBoW && !CurrentHQBowVec.empty();
+
     float minScore = 1;
     for(size_t i=0; i<vpConnectedKeyFrames.size(); i++)
     {
         KeyFrame* pKF = vpConnectedKeyFrames[i];
         if(pKF->isBad())
             continue;
-        const DBoW2::BowVector &BowVec = pKF->mBowVec;
 
-        float score = mpORBVocabulary->score(CurrentBowVec, BowVec);
+        float score;
+        const DBoW2::BowVector HQBowVec = pKF->GetHQBoWVec();
+        if(bCurrentHasHQ && !HQBowVec.empty())
+        {
+            score = mpORBVocabulary->score(CurrentHQBowVec, HQBowVec);
+        }
+        else
+        {
+            const DBoW2::BowVector &BowVec = pKF->mBowVec;
+            score = mpORBVocabulary->score(CurrentBowVec, BowVec);
+        }
 
         if(score<minScore)
             minScore = score;

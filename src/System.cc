@@ -97,6 +97,7 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
 
     mpHQmanager = new HighQualityManager(mpMap, mpVocabulary, "observation", 10.0, msAgentName);
     mptHQmanager = new thread(&ORB_SLAM2::HighQualityManager::Run, mpHQmanager);
+    mpTracker->SetHQManager(mpHQmanager);
 
     //Initialize the Viewer thread and launch
     if(bUseViewer)

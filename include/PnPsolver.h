@@ -71,7 +71,16 @@ class PnPsolver {
 
   cv::Mat iterate(int nIterations, bool &bNoMore, vector<bool> &vbInliers, int &nInliers);
 
+  // Best RANSAC consensus reached so far, even when below the acceptance
+  // threshold. Diagnostic: distinguishes "almost enough inliers" from
+  // "matches geometrically incoherent".
+  int GetBestNumInliers() const { return mnBestInliersAny; }
+
  private:
+
+  // Best consensus over all hypotheses, regardless of the acceptance floor
+  // (mnBestInliers is only updated once the floor is reached).
+  int mnBestInliersAny = 0;
 
   void CheckInliers();
   bool Refine();

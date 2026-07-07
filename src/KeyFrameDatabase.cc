@@ -236,7 +236,10 @@ vector<KeyFrame*> KeyFrameDatabase::DetectRelocalizationCandidates(Frame *F)
             maxCommonWords=(*lit)->mnRelocWords;
     }
 
-    int minCommonWords = maxCommonWords*0.8f;
+    // Relaxed 0.8->0.6: the relative gate returned only 1-2 candidates when a
+    // single (possibly wrong) keyframe dominated the shared-word count,
+    // starving the geometric verification stage of alternatives.
+    int minCommonWords = maxCommonWords*0.6f;
 
     list<pair<float,KeyFrame*> > lScoreAndMatch;
 
@@ -290,8 +293,9 @@ vector<KeyFrame*> KeyFrameDatabase::DetectRelocalizationCandidates(Frame *F)
             bestAccScore=accScore;
     }
 
-    // Return all those keyframes with a score higher than 0.75*bestScore
-    float minScoreToRetain = 0.75f*bestAccScore;
+    // Return all those keyframes with a score higher than 0.6*bestScore
+    // (relaxed from 0.75 to surface more candidates for geometric verification)
+    float minScoreToRetain = 0.6f*bestAccScore;
     set<KeyFrame*> spAlreadyAddedKF;
     vector<KeyFrame*> vpRelocCandidates;
     vpRelocCandidates.reserve(lAccScoreAndMatch.size());

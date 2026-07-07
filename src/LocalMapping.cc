@@ -187,6 +187,13 @@ void LocalMapping::MapPointCulling()
         {
             lit = mlpRecentAddedMapPoints.erase(lit);
         }
+        else if(pMP->mbFromAgent)
+        {
+            // Seeded from a foreign agent during relocalization: starts with a
+            // single observation, so the standard culling rules would always
+            // erase it before tracking can accumulate more observations.
+            lit = mlpRecentAddedMapPoints.erase(lit);
+        }
         else if(pMP->GetFoundRatio()<0.25f )
         {
             pMP->SetBadFlag();

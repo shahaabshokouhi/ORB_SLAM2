@@ -141,7 +141,10 @@ public:
     bool mbHighQaulity = false;
     bool mbSentToOther = false;
     bool mbReceivedFromOther = false;
-    bool mbQueuedForHq = false; 
+    bool mbQueuedForHq = false;
+    // Seeded into the host map from a foreign agent during relocalization;
+    // exempt from MapPointCulling (starts with a single observation).
+    bool mbFromAgent = false;
     std::vector<int> mvnObservations;
 
 

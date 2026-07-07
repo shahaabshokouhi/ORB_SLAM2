@@ -206,6 +206,10 @@ cv::Mat PnPsolver::iterate(int nIterations, bool &bNoMore, vector<bool> &vbInlie
         // Check inliers
         CheckInliers();
 
+        // diagnostic: best consensus reached even when below the floor
+        if(mnInliersi>mnBestInliersAny)
+            mnBestInliersAny = mnInliersi;
+
         if(mnInliersi>=mRansacMinInliers)
         {
             // If it is the best solution so far, save it
@@ -896,7 +900,9 @@ void PnPsolver::qr_solve(cv::Mat * A, cv::Mat * b, cv::Mat * X)
 
     if (eta == 0) {
       A1[k] = A2[k] = 0.0;
-      cerr << "God damnit, A is singular, this shouldn't happen." << endl;
+      cerr << "[PnPsolver] EPnP linear system is singular: the sampled points are in a "
+              "degenerate configuration (e.g. collinear or coplanar). "
+              "Discarding this RANSAC hypothesis and continuing." << endl;
       return;
     } else {
       double * ppAik = ppAkk, sum = 0.0, inv_eta = 1. / eta;

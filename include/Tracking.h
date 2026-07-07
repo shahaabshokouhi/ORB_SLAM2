@@ -49,6 +49,7 @@ class Map;
 class LocalMapping;
 class LoopClosing;
 class System;
+class HighQualityManager;
 
 class Tracking
 {  
@@ -65,6 +66,7 @@ public:
     void SetLocalMapper(LocalMapping* pLocalMapper);
     void SetLoopClosing(LoopClosing* pLoopClosing);
     void SetViewer(Viewer* pViewer);
+    void SetHQManager(HighQualityManager* pHQManager);
 
     // Load new settings
     // The focal lenght should be similar or scale prediction will fail when projecting points
@@ -134,6 +136,17 @@ protected:
 
     bool Relocalization();
 
+    // Fallback: relocalize against map points received from other agents
+    // (requires an established inter-agent transform in the HQ manager).
+    bool RelocalizationForeign();
+
+    // RGB-D rescue: metric 3D-3D alignment (frame depth vs candidate map
+    // points) when 2D-3D PnP fails. nInliers3D reports the best rigid
+    // consensus found (diagnostic) regardless of success.
+    bool RelocalizationDepthAlign(KeyFrame* pKFCand,
+                                  const std::vector<MapPoint*> &vpMatches,
+                                  int &nInliers3D, int &nGood);
+
     void UpdateLocalMap();
     void UpdateLocalPoints();
     void UpdateLocalKeyFrames();
@@ -144,6 +157,11 @@ protected:
     bool NeedNewKeyFrame();
     void CreateNewKeyFrame();
 
+    // Promote the current frame to a keyframe after a successful foreign-agent
+    // relocalization, synchronously creating host MapPoints from the PnP-inlier
+    // foreign correspondences (kp index -> 3D point in host frame).
+    bool CreateForeignRelocKeyFrame(const std::vector<std::pair<int,cv::Point3f>> &vForeign);
+
     // In case of performing only localization, this flag is true when there are no matches to
     // points in the map. Still tracking will continue if there are enough matches with temporal points.
     // In that case we are doing visual odometry. The system will try to do relocalization to recover
@@ -153,6 +171,11 @@ protected:
     //Other Thread Pointers
     LocalMapping* mpLocalMapper;
     LoopClosing* mpLoopClosing;
+    HighQualityManager* mpHQManager = nullptr;
+
+    // Relocalization diagnostics + foreign-reloc throttling
+    unsigned int mnRelocAttempts = 0;
+    unsigned int mnLastForeignRelocFrameId = 0;
 
     //ORB
     ORBextractor* mpORBextractorLeft, *mpORBextractorRight;

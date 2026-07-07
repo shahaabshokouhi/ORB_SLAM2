@@ -23,6 +23,18 @@ namespace ORB_SLAM2
 class Map;
 class MapPoint;
 class KeyFrame;
+class Frame;
+
+// Result of relocalizing against another agent's shared map points.
+// Tcw is the recovered camera pose; inliers pairs a keypoint index in the
+// query frame with the matched 3D point already transformed into THIS
+// agent's world frame.
+struct ForeignRelocResult
+{
+    cv::Mat Tcw;
+    std::vector<std::pair<int, cv::Point3f>> inliers;
+    std::string agentName;
+};
 
 class HighQualityManager
 {
@@ -45,6 +57,22 @@ public:
                      DBoW2::BowVector& bow,
                      DBoW2::FeatureVector* feat = nullptr);
     vector<cv::Point3f> ExportMergedMap();
+
+    // Try to relocalize a lost frame against map points received from other
+    // agents (only agents whose SE3 transform into this frame is known).
+    // Requires F.mBowVec to be computed. Returns true and fills `out` on success.
+    bool RelocalizeAgainstForeign(Frame &F, ForeignRelocResult &out);
+
+    // Rigid 3D-3D alignment with RANSAC (Umeyama on 3-point samples).
+    // Estimates Tcw such that Pc ~= R*Pw + t. Returns true when the inlier
+    // consensus reaches minInliers; vInliers always reports the best consensus
+    // found (diagnostic), even on failure.
+    static bool EstimateSE3_3D3D(const std::vector<cv::Point3f> &Pw,
+                                 const std::vector<cv::Point3f> &Pc,
+                                 cv::Mat &Tcw, std::vector<int> &vInliers,
+                                 double thresh = 0.10, int iters = 500,
+                                 int minInliers = 12);
+
     std::string msAgentName;
     
 

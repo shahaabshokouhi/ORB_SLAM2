@@ -61,6 +61,8 @@ protected:
     int N;
     vector<cv::KeyPoint> mvCurrentKeys;
     vector<bool> mvbMap, mvbVO;
+    vector<bool> mvbHQ;   // tracked point is a High-Quality map point
+    int mnTrackedHQ;
     bool mbOnlyTracking;
     int mnTracked, mnTrackedVO;
     vector<cv::KeyPoint> mvIniKeys;

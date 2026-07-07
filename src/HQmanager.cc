@@ -2,8 +2,11 @@
 #include "Map.h"
 #include "MapPoint.h"
 #include "KeyFrame.h"
+#include "Frame.h"
 #include "Thirdparty/DBoW2/DBoW2/BowVector.h"
 #include "Thirdparty/DBoW2/DBoW2/FeatureVector.h"
+
+#include <opencv2/calib3d.hpp>
 
 
 #include <thread>
@@ -33,12 +36,9 @@ namespace {
         cv::Vec3d   t;
     };
     struct Candidate { KeyFrame* pkf; int kf; double score; };
-    struct Pair      { int kf1; int kf2; double score; };
     struct Pairs3D {
-        int kf2;
         std::vector<cv::Point3f> P1;
         std::vector<cv::Point3f> P2;
-        std::vector<cv::DMatch>  matches;
     };
     struct RansacSE3 {
         SE3 model;
@@ -52,22 +52,27 @@ namespace {
         std::unordered_map<int, std::vector<cv::Point3f>> kf2pts;
         std::unordered_map<int, std::vector<int>>         kf2mpids;
         std::unordered_map<int, DBoW2::BowVector>         kf2bow;
-        std::unordered_map<int, Candidate> best_pairs; // ref map kp, second map kp
-        std::unordered_map<int, Pairs3D> point_pairs;
+        // kf_id -> (mpid -> index into kf2descs/kf2pts/kf2mpids), O(1) upsert/erase
+        std::unordered_map<int, std::unordered_map<int,int>> kf2mpidx;
         // reverse map: mpid -> set of kf_ids that currently hold it (for stale-entry cleanup)
         std::unordered_map<int, std::unordered_set<int>> mpid2kfids;
 
         bool hasTransform = false;
         SE3  T;
     };
+    // Slim per-cycle snapshot of another agent's bucket: only the fields the
+    // SE3 estimation needs, so the copy under gBucketsMx stays cheap.
+    struct AgentSnapshot {
+        std::unordered_map<int, std::vector<cv::Mat>>     kf2descs; // cv::Mat headers are ref-counted, shallow
+        std::unordered_map<int, std::vector<cv::Point3f>> kf2pts;
+        std::unordered_map<int, DBoW2::BowVector>         kf2bow;
+    };
 
-    std::unordered_map<std::string, SE3> transformsToApply;
-    
+    std::unordered_map<std::string, SE3> transformsToApply; // guarded by gBucketsMx
+
     std::map<std::string, AgentBuckets> gAgentBuckets;
     std::unordered_map<std::string, std::unordered_map<int, MapPoint*>> nMpsPerAgent;
     std::mutex gBucketsMx;
-    std::unordered_map<int, std::vector<Candidate>> matched_frames;
-    std::vector<PairEst> pair_ests;
 
     // matching parameters
     // ratio: tightened 0.9->0.75 to reduce false positives when maxHam is relaxed
@@ -106,6 +111,16 @@ namespace {
     const double bow_floor_score = 0.02;
     const double bow_rel_cut    = 0.70;
     const bool printLog = false;
+    // ----------------------------
+
+    // Foreign relocalization thresholds
+    // BoW floor is lower than bow_floor_score: foreign BoWs are built from HQ
+    // points only, so absolute scores run lower than full-frame comparisons.
+    const double kForeignRelocBowFloor    = 0.015;
+    const int    kForeignRelocTopK        = 5;
+    const int    kForeignRelocMinMatches  = 20;   // 2D-3D pairs required before PnP
+    const int    kForeignRelocMinInliers  = 25;   // PnP RANSAC inliers to accept
+    const float  kForeignRelocReprojErr   = 5.0f; // px
     // ----------------------------
 
 
@@ -200,11 +215,17 @@ static RansacSE3 estimate_se3_ransac(
     std::mt19937 rng(seed);
     std::uniform_int_distribution<int> uni(0, N-1);
 
-    std::vector<int> idx(3);  // always 3 points, matches offline
+    int idx[3];  // always 3 points, matches offline
+    const double th2 = thresh * thresh;
 
     int best_inl = -1;
     SE3 best_T;
     std::vector<int> best_set;
+
+    // buffers reused across iterations
+    std::vector<cv::Point3f> sP(3), sQ(3);
+    std::vector<int> inl;
+    inl.reserve(N);
 
     for (int it = 0; it < maxIters; ++it) {
         // sample 3 distinct indices
@@ -213,27 +234,27 @@ static RansacSE3 estimate_se3_ransac(
             if (idx[0]!=idx[1] && idx[0]!=idx[2] && idx[1]!=idx[2]) break;
         }
 
-        std::vector<cv::Point3f> sP(3), sQ(3);
+        // skip collinear/degenerate samples before the SVD
+        if (!non_degenerate_3pt(P1[idx[0]], P1[idx[1]], P1[idx[2]])) continue;
+
         for (int k=0; k<3; ++k) {sP[k]=P1[idx[k]]; sQ[k]=P2[idx[k]];}
 
         SE3 Tm;
         if (!umeyama_rigid(sP, sQ, Tm)) continue;
 
-        // count inliers
-        std::vector<int> inl;
-        inl.reserve(N);
+        // count inliers (squared error, no sqrt per point)
+        inl.clear();
         for (int i=0; i<N; ++i) {
             cv::Vec3d x(P1[i].x, P1[i].y, P1[i].z);
-            cv::Vec3d y_pred = Tm.R * x + Tm.t;
-            cv::Vec3d y(P2[i].x, P2[i].y, P2[i].z);
-            double err = cv::norm(y_pred - y);
-            if (err < thresh) inl.push_back(i);
+            cv::Vec3d d = Tm.R * x + Tm.t - cv::Vec3d(P2[i].x, P2[i].y, P2[i].z);
+            if (d.dot(d) < th2) inl.push_back(i);
         }
 
         if ((int)inl.size() > best_inl) {
             best_inl = (int)inl.size();
             best_T = Tm;
             best_set = inl;
+            if (best_inl == N) break;  // perfect consensus, no better model exists
         }
     }
 
@@ -367,65 +388,6 @@ static inline cv::Point3f apply_se3(const SE3& T, const cv::Point3f& p)
     return cv::Point3f((float)y[0], (float)y[1], (float)y[2]);
 }
 
-static std::vector<cv::Point3f> unique_points_by_mpid(
-    const std::unordered_map<int, std::vector<cv::Point3f>>& kf2pts,
-    const std::unordered_map<int, std::vector<int>>& kf2mp,
-    bool average_duplicates = false)
-{
-    struct Acc {cv::Vec3d sum; int cnt=0;};
-    std::unordered_map<int, Acc> acc; // mp_id -> accumulator
-    acc.reserve(100000);
-
-    for (const auto& kv : kf2pts) {
-        int kf = kv.first;
-        const auto& pts = kv.second;
-
-        auto it = kf2mp.find(kf);
-        if (it == kf2mp.end()) continue;
-
-        const auto& mpids = it->second;
-        if (mpids.size() != pts.size()) continue;
-
-        for (size_t i=0; i<pts.size(); ++i) {
-            int id = mpids[i];
-            auto& a = acc[id];
-            if (average_duplicates) {
-                a.sum += cv::Vec3d(pts[i].x, pts[i].y, pts[i].z);
-                a.cnt += 1;
-            } else {
-                if (a.cnt == 0) {
-                    a.sum = cv::Vec3d(pts[i].x, pts[i].y, pts[i].z);
-                    a.cnt = 1;
-                }
-            }
-        }
-    }
-
-    std::vector<cv::Point3f> out;
-    out.reserve(acc.size());
-    for (auto& kv : acc) {
-        const auto& a = kv.second;
-        if (a.cnt <= 0) continue;
-        cv::Vec3d m = (a.cnt > 0) ? (a.sum * (1.0 / a.cnt)) : a.sum;
-        out.emplace_back((float)m[0], (float)m[1], (float)m[2]);
-    }
-    return out;
-}
-
-static bool write_points_csv(const std::string& path,
-                             const std::vector<cv::Point3f> pts,
-                             const char* header = "x,y,z")
-{
-    std::ofstream ofs(path);
-    if (!ofs.is_open()) return false;
-    ofs << header << "\n";
-    ofs.setf(std::ios::fixed); ofs << std::setprecision(6);
-    for (const auto& p : pts) {
-        ofs << p.x << "," << p.y << "," << p.z << "\n";
-    }
-    return true;
-}
-
 static SE3 invert(const SE3& T)
 {
     SE3 Ti;
@@ -434,22 +396,22 @@ static SE3 invert(const SE3& T)
     return Ti;
 }
 
-static Pairs3D build_3d_pairs_from_kf(
-    KeyFrame* pkf, int kf2,
-    const std::unordered_map<int, std::vector<cv::Mat>>& kf2descs_2,
-    const std::unordered_map<int, std::vector<cv::Point3f>>& kf2pts_2,
-    float ratio=0.9f, int maxHamming=60)
+// Descriptor matrix + aligned 3D points for one keyframe's HQ map points.
+struct KFPointData {
+    cv::Mat A;                       // Nx32 CV_8U, one descriptor per row
+    std::vector<cv::Point3f> pts;    // aligned with rows of A
+};
+
+static KFPointData extract_host_kf_data(KeyFrame* pkf)
 {
-    Pairs3D out;
+    KFPointData out;
     if (!pkf) return out;
 
     vector<MapPoint*> vpMp = pkf->GetHighQualityMapPoints();
 
     std::vector<cv::Mat> D1v;
-    std::vector<cv::Point3f> P1v;
-
     D1v.reserve(vpMp.size());
-    P1v.reserve(vpMp.size());
+    out.pts.reserve(vpMp.size());
 
     for (auto& pMp: vpMp) {
         if (!pMp || pMp->isBad()) continue;
@@ -459,45 +421,46 @@ static Pairs3D build_3d_pairs_from_kf(
         if (d.empty()) continue;
         if (d.rows != 1) d = d.reshape(1, 1);           // force one row
         if (d.type() != CV_8U) d.convertTo(d, CV_8U);   // should already be CV_8U
-        D1v.push_back(d);
 
-        // 3D point in world
-        // ORB-SLAM2 has `cv::Mat GetWorldPos()`
         cv::Mat Xw = pMp->GetWorldPos();
-        if (Xw.empty()) { D1v.pop_back(); continue; }
-        Xw = Xw.reshape(1, 3);                          // make sure it's 3x1 or 1x3-ish
+        if (Xw.empty()) continue;
+        Xw = Xw.reshape(1, 3);
 
         cv::Point3f p;
         p.x = Xw.at<float>(0);
         p.y = Xw.at<float>(1);
         p.z = Xw.at<float>(2);
+        if (!finite3(p)) continue;
 
-        if (!finite3(p)) { D1v.pop_back(); continue; }  // keep vectors aligned
-        P1v.push_back(p);
+        D1v.push_back(d);
+        out.pts.push_back(p);
     }
 
-    auto itD2 = kf2descs_2.find(kf2);
-    auto itP2 = kf2pts_2.find(kf2);
-    if (itD2==kf2descs_2.end() || itP2==kf2pts_2.end()) return out;
+    if (!D1v.empty()) out.A = stack_rows(D1v);
+    return out;
+}
 
-    const auto& D2v = itD2->second;
-    const auto& P2v = itP2->second;
+static Pairs3D match_3d_pairs(
+    const KFPointData& host,
+    const cv::Mat& B, const std::vector<cv::Point3f>& P2v,
+    float ratio, int maxHamming,
+    long unsigned int kf_me_id, int kf2)
+{
+    Pairs3D out;
 
-    if (D1v.empty() || D2v.empty()) return out;
-    if (D1v.size() != P1v.size()) return out;
-    if (D2v.size() != P2v.size()) return out;
+    const cv::Mat& A = host.A;
+    const std::vector<cv::Point3f>& P1v = host.pts;
 
-    cv::Mat A = stack_rows(D1v);
-    cv::Mat B = stack_rows(D2v);
     if (A.empty() || B.empty()) return out;
+    if (A.rows != (int)P1v.size() || B.rows != (int)P2v.size()) return out;
 
     cv::BFMatcher matcher(cv::NORM_HAMMING, false);
     std::vector<std::vector<cv::DMatch>> knn;
     matcher.knnMatch(A, B, knn, 2);
 
     int raw_matches = 0;
-    std::vector<cv::DMatch> good;
-    good.reserve(knn.size());
+    out.P1.reserve(knn.size());
+    out.P2.reserve(knn.size());
 
     for (auto& v : knn) {
         if (v.empty()) continue;
@@ -507,41 +470,33 @@ static Pairs3D build_3d_pairs_from_kf(
 
         const auto& m1 = v[0];
         const auto& m2 = v[1];
-        if (m1.distance <= maxHamming && m1.distance <= ratio*m2.distance) {
-            good.push_back(m1);
-        }
-    
-    }
-    if (printLog) {
-        std::cout << "[MATCH DEBUG] KF_me=" << pkf->mnId
-            << " KF_other=" << kf2
-            << " raw_knn=" << raw_matches
-            << " good=" << good.size() << std::endl;
-    }
+        if (m1.distance > maxHamming || m1.distance > ratio*m2.distance) continue;
 
+        if (m1.queryIdx < 0 || m1.queryIdx >= (int)P1v.size()) continue;
+        if (m1.trainIdx < 0 || m1.trainIdx >= (int)P2v.size()) continue;
 
-    for (const auto& m : good) {
-
-        if (m.queryIdx < 0 || m.queryIdx >= (int)P1v.size()) continue;
-        if (m.trainIdx < 0 || m.trainIdx >= (int)P2v.size()) continue;
-
-        const cv::Point3f& X1 = P1v[m.queryIdx];
-        const cv::Point3f& X2 = P2v[m.trainIdx];
-
+        const cv::Point3f& X1 = P1v[m1.queryIdx];
+        const cv::Point3f& X2 = P2v[m1.trainIdx];
         if (!finite3(X1) || !finite3(X2)) continue;
 
         out.P1.push_back(X1);
         out.P2.push_back(X2);
-        out.matches.push_back(m);
+    }
+
+    if (printLog) {
+        std::cout << "[MATCH DEBUG] KF_me=" << kf_me_id
+            << " KF_other=" << kf2
+            << " raw_knn=" << raw_matches
+            << " good=" << out.P1.size() << std::endl;
     }
 
     return out;
 }
 
 
-HighQualityManager::HighQualityManager(Map* pMap, ORBVocabulary* mpVoc, 
+HighQualityManager::HighQualityManager(Map* pMap, ORBVocabulary* mpVoc,
     const std::string& criteria, double period_sec, string agentName)
-:mpMap(pMap), mpVoc(mpVoc), mCriteria(criteria), mPeriodSec(period_sec), msAgentName(agentName) {}
+:msAgentName(agentName), mpMap(pMap), mCriteria(criteria), mPeriodSec(period_sec), mpVoc(mpVoc) {}
 
 
 void HighQualityManager::Run()
@@ -567,6 +522,12 @@ void HighQualityManager::Run()
             crit = mCriteria;
         }
 
+        // resolve criteria once instead of comparing strings per map point
+        enum class Crit { Observation, FoundRatio, Combo, None };
+        const Crit critMode = (crit == "observation") ? Crit::Observation
+                            : (crit == "foundratio")  ? Crit::FoundRatio
+                            : (crit == "combo")       ? Crit::Combo
+                                                      : Crit::None;
 
         for (MapPoint* pMP : vMPs) {
             if (!pMP) continue;
@@ -576,19 +537,24 @@ void HighQualityManager::Run()
 
                 ApplyToMapPoint(pMP, isHQ);
                 mpMap->RemoveHighQaulityMapPoints(pMP);
-            
+
             } else {
 
-                if (crit=="observation") {
-                    isHQ = (pMP->Observations() >= kMinObs);
-                } else if (crit=="foundratio") {
-                    isHQ = (pMP->GetFoundRatio() >= kMinFoundRatio);
-                } else if (crit=="combo")
-                {
-                    isHQ = (pMP->Observations() >= kMinObs) &&
-                        (pMP->GetFoundRatio() >= kMinFoundRatio);
+                switch (critMode) {
+                    case Crit::Observation:
+                        isHQ = (pMP->Observations() >= kMinObs);
+                        break;
+                    case Crit::FoundRatio:
+                        isHQ = (pMP->GetFoundRatio() >= kMinFoundRatio);
+                        break;
+                    case Crit::Combo:
+                        isHQ = (pMP->Observations() >= kMinObs) &&
+                               (pMP->GetFoundRatio() >= kMinFoundRatio);
+                        break;
+                    case Crit::None:
+                        break;
                 }
-                
+
                 ApplyToMapPoint(pMP, isHQ);
                 if (isHQ) {
                     mpMap->AddHighQualityMapPoints(pMP);
@@ -619,13 +585,19 @@ void HighQualityManager::Run()
             }
         }
 
-        // === OLD BLOCK REPLACED BY THIS ===
-
-        // 1) Take a snapshot of the current buckets under a short lock
-        std::map<std::string, AgentBuckets> bucketsCopy;
+        // 1) Snapshot only the fields the SE3 estimation reads, and only for
+        //    OTHER agents with data — keeps the time under gBucketsMx short.
+        std::map<std::string, AgentSnapshot> bucketsCopy;
         {
             std::unique_lock<std::mutex> glock(gBucketsMx);
-            bucketsCopy = gAgentBuckets;
+            for (const auto &ka : gAgentBuckets) {
+                if (ka.first == msAgentName) continue;
+                if (ka.second.kf2bow.empty()) continue;
+                AgentSnapshot &s = bucketsCopy[ka.first];
+                s.kf2descs = ka.second.kf2descs;
+                s.kf2pts   = ka.second.kf2pts;
+                s.kf2bow   = ka.second.kf2bow;
+            }
         }
 
         // thresholds for the pooled refinement
@@ -639,60 +611,47 @@ void HighQualityManager::Run()
 
         auto rad2deg = [](double r){ return r * 180.0 / M_PI; };
 
-        // Make sure we actually have our own agent in the snapshot
         if (bucketsCopy.empty()) {
             std::cerr << "No information received from other agents, waiting ...\n";
         } else {
 
-            // For each OTHER agent, compute SE3 from snapshot (no locks here)
+            // Host-KF descriptor matrices are reused across all other agents;
+            // build lazily and cache for this cycle.
+            std::unordered_map<KeyFrame*, KFPointData> hostKFCache;
+            auto getHostData = [&](KeyFrame* pkf) -> const KFPointData& {
+                auto it = hostKFCache.find(pkf);
+                if (it == hostKFCache.end())
+                    it = hostKFCache.emplace(pkf, extract_host_kf_data(pkf)).first;
+                return it->second;
+            };
 
+            // Transforms computed this cycle; applied under one lock afterwards
+            std::unordered_map<std::string, SE3> newTransforms;
+
+            // For each OTHER agent, compute SE3 from snapshot (no locks here)
             for (auto &ka : bucketsCopy) {
                 const std::string &otherName = ka.first;
-                if (otherName == msAgentName) continue;
+                AgentSnapshot &otherBucketSnap = ka.second;
 
-                AgentBuckets &otherBucketSnap = ka.second;
+                // Several host KFs can match the same other-agent KF; stack its
+                // descriptor matrix once per cycle.
+                std::unordered_map<int, cv::Mat> stackedOtherDescs;
 
                 std::vector<Candidate> matchedCandidates;
+                matchedCandidates.reserve(vpKFs.size());
 
-                // kf pairing
+                // kf pairing: keep only the single best-scoring other-KF per host KF
                 for (KeyFrame* pkf_me : vpKFs) {
-                    int kf_me = pkf_me->mnId;
                     const auto &bow_me = pkf_me->mHQBowVec;
 
-                    double best_score = 0.0;
-                    std::vector<Candidate> cands;
-
-                    // compare this agent's kf_me with each NEW keyframe from 'agent_name'
+                    Candidate best{pkf_me, -1, 0.0};
                     for (const auto &kv_other : otherBucketSnap.kf2bow) {
-                        int kf_other = kv_other.first;
-                        const auto &bow_other = kv_other.second;
-
-                        double sc = mpVoc->score(bow_me, bow_other);
-                        cands.push_back({pkf_me, kf_other, sc});
-                        if (sc > best_score) best_score = sc;
+                        double sc = mpVoc->score(bow_me, kv_other.second);
+                        if (sc > best.score) { best.kf = kv_other.first; best.score = sc; }
                     }
 
-                    if (cands.empty()) continue;
-
-                    const double thresh = std::max(bow_floor_score, bow_rel_cut * best_score);
-
-                    // keep only strong candidates
-                    cands.erase(std::remove_if(cands.begin(), cands.end(),
-                                            [&](const Candidate &c) {
-                                                return c.score < thresh;
-                                            }),
-                                cands.end());
-
-                    if (cands.empty()) continue;
-
-                    // sort descending by score
-                    std::sort(cands.begin(), cands.end(),
-                            [](const Candidate &a, const Candidate &b) {
-                                return a.score > b.score;
-                            });
-
-                    const Candidate new_best = cands.front();
-                    matchedCandidates.push_back(new_best);
+                    if (best.kf >= 0 && best.score >= bow_floor_score)
+                        matchedCandidates.push_back(best);
                 }
 
 
@@ -725,11 +684,21 @@ void HighQualityManager::Run()
                     KeyFrame* pkf = candidate.pkf;
                     const int kf_other = candidate.kf;
 
-                    Pairs3D pairs = build_3d_pairs_from_kf(
-                        pkf, kf_other,
-                        otherBucketSnap.kf2descs,
-                        otherBucketSnap.kf2pts,
-                        ratio, maxHam
+                    auto itP2 = otherBucketSnap.kf2pts.find(kf_other);
+                    if (itP2 == otherBucketSnap.kf2pts.end()) continue;
+
+                    auto itB = stackedOtherDescs.find(kf_other);
+                    if (itB == stackedOtherDescs.end()) {
+                        auto itD2 = otherBucketSnap.kf2descs.find(kf_other);
+                        if (itD2 == otherBucketSnap.kf2descs.end() || itD2->second.empty()) continue;
+                        itB = stackedOtherDescs.emplace(kf_other, stack_rows(itD2->second)).first;
+                    }
+
+                    Pairs3D pairs = match_3d_pairs(
+                        getHostData(pkf),
+                        itB->second, itP2->second,
+                        ratio, maxHam,
+                        pkf->mnId, kf_other
                     );
 
                     const int N = (int)pairs.P1.size();
@@ -814,7 +783,6 @@ void HighQualityManager::Run()
 
                 // ---- second-stage pooled RANSAC ----
                 SE3 T_other_from_me;
-                SE3 T_other_from_me_from_fuse;
                 bool usedPooled = false;
 
                 if (matchedFramesAfterRansac >= kMinMatchedFramesForPool &&
@@ -849,8 +817,8 @@ void HighQualityManager::Run()
                     }
                 }
 
-                // ---- fallback: fuse per-pair SE3s (your old approach) ----
-                if (true) {
+                // ---- fallback: fuse per-pair SE3s (only when pooling failed) ----
+                if (!usedPooled) {
                     std::vector<EstSE3Weighted> ests;
                     ests.reserve(pair_ests.size());
                     for (const auto &pe : pair_ests) {
@@ -860,14 +828,12 @@ void HighQualityManager::Run()
                         e.score   = pe.bow_score;
                         ests.push_back(e);
                     }
-                    T_other_from_me_from_fuse = fuse_transforms_weighted(ests);
+                    T_other_from_me = fuse_transforms_weighted(ests);
                 }
 
                 // We want transform from other agent -> this agent
-                SE3 T_me_from_other = invert(T_other_from_me);
-                SE3 T_me_from_other_from_fuse = invert(T_other_from_me_from_fuse);
-                // Use pooled RANSAC result when available; fall back to weighted fusion
-                transformsToApply[otherName] = usedPooled ? T_me_from_other : T_me_from_other_from_fuse;
+                const SE3 T_me_from_other = invert(T_other_from_me);
+                newTransforms[otherName] = T_me_from_other;
 
                 // Debug: print Euler angles (in degrees)
                 const cv::Matx33d &R = T_me_from_other.R;
@@ -875,43 +841,26 @@ void HighQualityManager::Run()
                 double pitch = std::asin(-R(2,0));
                 double roll  = std::atan2(R(2,1), R(2,2));
 
-                // Debug: print Euler angles (in degrees)
-                const cv::Matx33d &R_fuse = T_me_from_other_from_fuse.R;
-                double yaw_fuse   = std::atan2(R_fuse(1,0), R_fuse(0,0));
-                double pitch_fuse = std::asin(-R_fuse(2,0));
-                double roll_fuse  = std::atan2(R_fuse(2,1), R_fuse(2,2));
-
-                std::cout << "\nFused transform from pool " << otherName
+                std::cout << "\nTransform (" << (usedPooled ? "pooled RANSAC" : "weighted fusion")
+                        << ") " << otherName
                         << " --> " << msAgentName << ":\n"
                         << "R = \n" << cv::Mat(T_me_from_other.R) << "\n"
                         << "t = " << T_me_from_other.t << "\n"
                         << "angles (deg): roll="  << rad2deg(roll)
                         << " pitch=" << rad2deg(pitch)
                         << " yaw="   << rad2deg(yaw) << "\n\n";
-
-                
-                std::cout << "\nFused transform from fuse " << otherName
-                        << " --> " << msAgentName << ":\n"
-                        << "R = \n" << cv::Mat(T_me_from_other_from_fuse.R) << "\n"
-                        << "t = " << T_me_from_other_from_fuse.t << "\n"
-                        << "angles (deg): roll="  << rad2deg(roll_fuse)
-                        << " pitch=" << rad2deg(pitch_fuse)
-                        << " yaw="   << rad2deg(yaw_fuse) << "\n\n";
             }
 
-            // Apply back to live buckets under a short lock
-            if (!transformsToApply.empty()) {
+            // Publish new transforms and update live buckets under one short lock
+            if (!newTransforms.empty()) {
                 std::unique_lock<std::mutex> glock(gBucketsMx);
-                for (const auto &kv : transformsToApply) {
-                    const std::string &otherName = kv.first;
-                    const SE3 &T_me_from_other   = kv.second;
+                for (const auto &kv : newTransforms) {
+                    transformsToApply[kv.first] = kv.second;
 
-                    auto itLive = gAgentBuckets.find(otherName);
+                    auto itLive = gAgentBuckets.find(kv.first);
                     if (itLive == gAgentBuckets.end()) continue;
-
-                    AgentBuckets &otherBucketLive = itLive->second;
-                    otherBucketLive.T = T_me_from_other;
-                    otherBucketLive.hasTransform     = true;
+                    itLive->second.T = kv.second;
+                    itLive->second.hasTransform = true;
                 }
             }
         }
@@ -956,13 +905,6 @@ void HighQualityManager::ApplyToMapPoint(MapPoint* pMP, bool isHQ)
             pKF->EraseHighQualityMapPoint(idx);
         }
     }
-}
-
-static std::string JoinIds(const std::vector<long unsigned int>& ids, const char* sep=",")
-{
-    std::ostringstream oss;
-    for (size_t i=0;i<ids.size();++i){ if(i) oss<<sep; oss<<ids[i]; }
-    return oss.str();
 }
 
 static std::string DescriptorRowToHex(const cv::Mat& row) {
@@ -1059,7 +1001,7 @@ void HighQualityManager::ExportBoWTopMatchesCSV(const std::string& csv_path,
         std::vector<long unsigned int> top_bow_ids;
         std::vector<long unsigned int> top_hq_ids;
 
-        int taken = 0;
+        size_t taken = 0;
         for (size_t k = 0; k < sc_bow.size() && taken < (size_t)topK; ++k) {
             size_t j = sc_bow[k].second;
             long long gap = (long long)frameIds[i] - (long long)frameIds[j];
@@ -1146,12 +1088,12 @@ void HighQualityManager::ExportMapPointDescriptorsCSV(const std::string& csv_pat
 
     size_t rows_written = 0;
 
-    // Helper: write one MapPoint row.
+    // Write one MapPoint row.
     // For host points, obs come from GetObservations() (KeyFrame* map).
     // For received points, obs come from mvnObservations (vector<int>).
     // Both are written as semicolon-separated integers in the observations column.
-    auto writeMP = [&](const std::string& agentName, MapPoint* pMP,
-                       const std::vector<int>& obs_ids) {
+    auto writeMP = [](std::ofstream& os, MapPoint* pMP,
+                      const std::vector<int>& obs_ids) {
         cv::Mat Xw = pMP->GetWorldPos();
         double X = 0.0, Y = 0.0, Z = 0.0;
         if (!Xw.empty() && Xw.rows >= 3 && Xw.cols >= 1) {
@@ -1165,17 +1107,14 @@ void HighQualityManager::ExportMapPointDescriptorsCSV(const std::string& csv_pat
         std::sort(sorted_ids.begin(), sorted_ids.end());
         sorted_ids.erase(std::unique(sorted_ids.begin(), sorted_ids.end()), sorted_ids.end());
 
-        std::ostringstream obss;
+        os << pMP->mnId << ","
+           << X << "," << Y << "," << Z << ","
+           << "\"" << hex << "\",\"";
         for (size_t i = 0; i < sorted_ids.size(); ++i) {
-            if (i) obss << ';';
-            obss << sorted_ids[i];
+            if (i) os << ';';
+            os << sorted_ids[i];
         }
-
-        ofs << pMP->mnId << ","
-            << X << "," << Y << "," << Z << ","
-            << "\"" << hex << "\","
-            << "\"" << obss.str() << "\"\n";
-        ++rows_written;
+        os << "\"\n";
     };
 
     // --- Host HQ map points ---
@@ -1199,7 +1138,8 @@ void HighQualityManager::ExportMapPointDescriptorsCSV(const std::string& csv_pat
         }
         if (obs_ids.empty()) continue;
 
-        writeMP(msAgentName, pMP, obs_ids);
+        writeMP(ofs, pMP, obs_ids);
+        ++rows_written;
     }
 
     ofs.close();
@@ -1229,39 +1169,12 @@ void HighQualityManager::ExportMapPointDescriptorsCSV(const std::string& csv_pat
         aofs << "mp_id,mp_x,mp_y,mp_z,descriptor_hex,observations\n";
 
         size_t agent_rows = 0;
-        // Temporarily redirect writeMP output to aofs
-        auto writeAgentMP = [&](MapPoint* pMP, const std::vector<int>& obs_ids) {
-            cv::Mat Xw = pMP->GetWorldPos();
-            double X = 0.0, Y = 0.0, Z = 0.0;
-            if (!Xw.empty() && Xw.rows >= 3 && Xw.cols >= 1) {
-                X = static_cast<double>(Xw.at<float>(0));
-                Y = static_cast<double>(Xw.at<float>(1));
-                Z = static_cast<double>(Xw.at<float>(2));
-            }
-            std::string hex = DescriptorRowToHex(pMP->GetDescriptor());
-
-            std::vector<int> sorted_ids = obs_ids;
-            std::sort(sorted_ids.begin(), sorted_ids.end());
-            sorted_ids.erase(std::unique(sorted_ids.begin(), sorted_ids.end()), sorted_ids.end());
-
-            std::ostringstream obss;
-            for (size_t i = 0; i < sorted_ids.size(); ++i) {
-                if (i) obss << ';';
-                obss << sorted_ids[i];
-            }
-
-            aofs << pMP->mnId << ","
-                 << X << "," << Y << "," << Z << ","
-                 << "\"" << hex << "\","
-                 << "\"" << obss.str() << "\"\n";
-            ++agent_rows;
-        };
-
         for (const auto& kv : ka.second) {
             MapPoint* pMP = kv.second;
             if (!pMP || pMP->isBad()) continue;
             if (pMP->mvnObservations.empty()) continue;
-            writeAgentMP(pMP, pMP->mvnObservations);
+            writeMP(aofs, pMP, pMP->mvnObservations);
+            ++agent_rows;
         }
 
         aofs.close();
@@ -1305,37 +1218,31 @@ vector<cv::Point3f> HighQualityManager::ExportMergedMap() {
     }
 
     // ── Received agent map points (need SE3 transform into this frame) ────────
-    std::unordered_map<std::string, std::unordered_map<int, MapPoint*>> snapPointsPerAgent;
-    std::unordered_map<std::string, SE3> snapTransformsToApply;
+    // Read positions while holding gBucketsMx: ImportHighQualityMapPoints may
+    // delete these MapPoints concurrently, so pointers must not escape the lock.
     {
         std::unique_lock<std::mutex> glock(gBucketsMx);
-        snapPointsPerAgent = nMpsPerAgent;
-        snapTransformsToApply = transformsToApply;
-    }
 
-    if (snapPointsPerAgent.empty() || snapTransformsToApply.empty()) return out;
-
-    for (const auto& agentToPts : snapPointsPerAgent) {
-        const std::string& agentName = agentToPts.first;
-        auto tit = snapTransformsToApply.find(agentName);
-        if (tit == snapTransformsToApply.end()) continue;
-        const SE3& T = tit->second;                    // T_me_from_other
-        const auto& idToPts = agentToPts.second;
-        if (idToPts.empty()) continue;
-        out.reserve(out.size() + idToPts.size());
-        for (const auto& idToPt : idToPts) {
-            MapPoint* pMP = idToPt.second;
-            if (!pMP || pMP->isBad()) continue;
-            cv::Mat pos = pMP->GetWorldPos();
-            if (pos.empty()) continue;
-            cv::Point3f p(pos.at<float>(0), pos.at<float>(1), pos.at<float>(2));
-            if (!finite3(p)) continue;
-            out.push_back(apply_se3(T, p));            // transform into this agent's frame
+        for (const auto& agentToPts : nMpsPerAgent) {
+            auto tit = transformsToApply.find(agentToPts.first);
+            if (tit == transformsToApply.end()) continue;
+            const SE3& T = tit->second;                // T_me_from_other
+            const auto& idToPts = agentToPts.second;
+            if (idToPts.empty()) continue;
+            out.reserve(out.size() + idToPts.size());
+            for (const auto& idToPt : idToPts) {
+                MapPoint* pMP = idToPt.second;
+                if (!pMP || pMP->isBad()) continue;
+                cv::Mat pos = pMP->GetWorldPos();
+                if (pos.empty()) continue;
+                cv::Point3f p(pos.at<float>(0), pos.at<float>(1), pos.at<float>(2));
+                if (!finite3(p)) continue;
+                out.push_back(apply_se3(T, p));        // transform into this agent's frame
+            }
         }
     }
 
     return out;
-
 }
 void HighQualityManager::ImportHighQualityMapPoints(
     const std::string &agent_name,
@@ -1343,7 +1250,6 @@ void HighQualityManager::ImportHighQualityMapPoints(
 {   
     if (agent_name == msAgentName) return;
 
-    size_t agentMpCount = 0;
     std::unordered_set<int> updated_keyframes;
     // Descriptor snapshots for BoW computation (taken under lock, computed outside)
     std::unordered_map<int, std::vector<cv::Mat>> kf_descs_for_bow;
@@ -1353,32 +1259,81 @@ void HighQualityManager::ImportHighQualityMapPoints(
         std::unique_lock<std::mutex> glock(gBucketsMx);
 
         auto& agentMpMap = nMpsPerAgent[agent_name];
-        for (auto* MP : vMPs) {
-            int mpid = static_cast<int>(MP->mnId);
-            if (MP->isBad() || !MP->mbHighQaulity) {
+        AgentBuckets &agentBucket = gAgentBuckets[agent_name];
+
+        // Remove one map point's entry from one keyframe's aligned vectors in
+        // O(1) via kf2mpidx + swap-and-pop (vector order carries no meaning).
+        auto removeMpFromKF = [&](int kf_id, int mpid) {
+            auto idxIt = agentBucket.kf2mpidx.find(kf_id);
+            if (idxIt == agentBucket.kf2mpidx.end()) return;
+            auto &idxMap = idxIt->second;
+            auto ii = idxMap.find(mpid);
+            if (ii == idxMap.end()) return;
+            const int i = ii->second;
+
+            auto &vD = agentBucket.kf2descs[kf_id];
+            auto &vP = agentBucket.kf2pts[kf_id];
+            auto &vM = agentBucket.kf2mpids[kf_id];
+
+            const int last = (int)vM.size() - 1;
+            if (i != last) {
+                vM[i] = vM[last];
+                vD[i] = vD[last];
+                vP[i] = vP[last];
+                idxMap[vM[i]] = i;
+            }
+            vM.pop_back(); vD.pop_back(); vP.pop_back();
+            idxMap.erase(ii);
+
+            if (vM.empty()) {
+                agentBucket.kf2bow.erase(kf_id);
+                agentBucket.kf2descs.erase(kf_id);
+                agentBucket.kf2pts.erase(kf_id);
+                agentBucket.kf2mpids.erase(kf_id);
+                agentBucket.kf2mpidx.erase(kf_id);
+                updated_keyframes.erase(kf_id);
+            } else {
+                updated_keyframes.insert(kf_id);
+            }
+        };
+
+        // Purge a map point from every keyframe bucket that still holds it.
+        auto purgeMp = [&](int mpid) {
+            auto prevIt = agentBucket.mpid2kfids.find(mpid);
+            if (prevIt == agentBucket.mpid2kfids.end()) return;
+            for (int kf_id : prevIt->second)
+                removeMpFromKF(kf_id, mpid);
+            agentBucket.mpid2kfids.erase(prevIt);
+        };
+
+        for (ORB_SLAM2::MapPoint* pSrcMP : vMPs) {
+            if (!pSrcMP) continue;
+            const int mpid = static_cast<int>(pSrcMP->mnId);
+
+            // --- bad / no-longer-HQ points: drop stored copy AND bucket entries ---
+            if (pSrcMP->isBad() || !pSrcMP->mbHighQaulity) {
                 auto it = agentMpMap.find(mpid);
                 if (it != agentMpMap.end()) {
                     delete it->second;
                     agentMpMap.erase(it);
                 }
-            } else {
-                auto it = agentMpMap.find(mpid);
-                if (it != agentMpMap.end() && it->second != MP)
-                    delete it->second;
-                agentMpMap[mpid] = MP;
+                purgeMp(mpid);
+                continue;
             }
-        }
 
-        AgentBuckets &agentBucket = gAgentBuckets[agent_name];
-
-        for (ORB_SLAM2::MapPoint* pSrcMP : vMPs) {
-            if (!pSrcMP) continue;
+            // --- keep/refresh stored copy ---
+            {
+                auto it = agentMpMap.find(mpid);
+                if (it != agentMpMap.end() && it->second != pSrcMP)
+                    delete it->second;
+                agentMpMap[mpid] = pSrcMP;
+            }
 
             cv::Mat X = pSrcMP->GetWorldPos();
-            bool hasPos = (!X.empty() && X.rows >= 3 && X.cols >= 1);
+            const bool hasPos = (!X.empty() && X.rows >= 3 && X.cols >= 1);
 
             cv::Mat desc = pSrcMP->GetDescriptor();
-            bool hasDesc = (!desc.empty() && desc.rows == 1 && desc.cols == 32 && desc.type() == CV_8U);
+            const bool hasDesc = (!desc.empty() && desc.rows == 1 && desc.cols == 32 && desc.type() == CV_8U);
             if (!hasDesc) {
                 std::cerr << "[HQManager] MapPoint " << pSrcMP->mnId
                         << " from agent " << agent_name
@@ -1386,64 +1341,39 @@ void HighQualityManager::ImportHighQualityMapPoints(
                         << " cols=" << desc.cols << " type=" << desc.type() << "\n";
             }
 
-            int mpid = static_cast<int>(pSrcMP->mnId);
             std::unordered_set<int> newKfIds(pSrcMP->mvnObservations.begin(),
                                              pSrcMP->mvnObservations.end());
 
+            // remove stale entries: keyframes that no longer observe this point
             auto prevIt = agentBucket.mpid2kfids.find(mpid);
             if (prevIt != agentBucket.mpid2kfids.end()) {
                 for (int old_kf : prevIt->second) {
                     if (newKfIds.count(old_kf)) continue;
-                    auto itD = agentBucket.kf2descs.find(old_kf);
-                    auto itP = agentBucket.kf2pts.find(old_kf);
-                    auto itM = agentBucket.kf2mpids.find(old_kf);
-                    if (itM == agentBucket.kf2mpids.end()) continue;
-                    auto &vM = itM->second;
-                    for (size_t i = 0; i < vM.size(); ++i) {
-                        if (vM[i] == mpid) {
-                            vM.erase(vM.begin() + i);
-                            if (itD != agentBucket.kf2descs.end()) itD->second.erase(itD->second.begin() + i);
-                            if (itP != agentBucket.kf2pts.end())   itP->second.erase(itP->second.begin() + i);
-                            if (vM.empty()) {
-                                agentBucket.kf2bow.erase(old_kf);
-                            } else {
-                                updated_keyframes.insert(old_kf);
-                            }
-                            break;
-                        }
-                    }
+                    removeMpFromKF(old_kf, mpid);
                 }
             }
 
-            agentBucket.mpid2kfids[mpid] = newKfIds;
+            agentBucket.mpid2kfids[mpid] = std::move(newKfIds);
+
+            if (!hasDesc || !hasPos) continue;
+
+            const cv::Point3f p{ X.at<float>(0), X.at<float>(1), X.at<float>(2) };
 
             for (int kf_id : pSrcMP->mvnObservations) {
-                if (!hasDesc || !hasPos) continue;
-
                 auto &vD = agentBucket.kf2descs[kf_id];
                 auto &vP = agentBucket.kf2pts[kf_id];
                 auto &vM = agentBucket.kf2mpids[kf_id];
+                auto &idxMap = agentBucket.kf2mpidx[kf_id];
 
-                int existing_idx = -1;
-                for (size_t i = 0; i < vM.size(); ++i) {
-                    if (vM[i] == mpid) { existing_idx = static_cast<int>(i); break; }
-                }
-
-                cv::Point3f p{ X.at<float>(0), X.at<float>(1), X.at<float>(2) };
-
-                if (existing_idx >= 0) {
-                    desc.copyTo(vD[existing_idx]);
-                    vP[existing_idx] = p;
+                auto ii = idxMap.find(mpid);
+                if (ii != idxMap.end()) {
+                    desc.copyTo(vD[ii->second]);
+                    vP[ii->second] = p;
                 } else {
+                    idxMap[mpid] = (int)vM.size();
                     vD.push_back(desc.clone());
                     vP.push_back(p);
                     vM.push_back(mpid);
-                }
-
-                if (!(vD.size() == vP.size() && vP.size() == vM.size())) {
-                    std::cerr << "[HQManager] size mismatch for agent " << agent_name
-                            << " KF " << kf_id << " descs=" << vD.size()
-                            << " pts=" << vP.size() << " mpids=" << vM.size() << "\n";
                 }
 
                 updated_keyframes.insert(kf_id);
@@ -1481,6 +1411,266 @@ void HighQualityManager::ImportHighQualityMapPoints(
             agentBucket.kf2bow[kv.first] = std::move(kv.second);
     }
 
+}
+
+bool HighQualityManager::EstimateSE3_3D3D(const std::vector<cv::Point3f> &Pw,
+                                          const std::vector<cv::Point3f> &Pc,
+                                          cv::Mat &Tcw, std::vector<int> &vInliers,
+                                          double thresh, int iters, int minInliers)
+{
+    Tcw.release();
+    vInliers.clear();
+
+    // run with the 3-point floor so the best consensus is always reported;
+    // the caller-supplied acceptance threshold is applied afterwards
+    RansacSE3 r = estimate_se3_ransac(Pw, Pc, thresh, iters, 3, 4242u);
+    if (r.ok)
+        vInliers = r.inliers;
+
+    if (!r.ok || (int)vInliers.size() < minInliers)
+        return false;
+
+    Tcw = cv::Mat::eye(4, 4, CV_32F);
+    for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 3; ++j)
+            Tcw.at<float>(i, j) = (float)r.model.R(i, j);
+        Tcw.at<float>(i, 3) = (float)r.model.t[i];
+    }
+    return true;
+}
+
+bool HighQualityManager::RelocalizeAgainstForeign(Frame &F, ForeignRelocResult &out)
+{
+    if (!mpVoc || F.mBowVec.empty()) return false;
+
+    // ── 1) Snapshot agents that have an established transform ────────────────
+    struct AgentRelocSnap {
+        std::string name;
+        SE3 T;  // T_me_from_other
+        std::unordered_map<int, std::vector<cv::Mat>>     kf2descs;
+        std::unordered_map<int, std::vector<cv::Point3f>> kf2pts;
+        std::unordered_map<int, DBoW2::BowVector>         kf2bow;
+    };
+    std::vector<AgentRelocSnap> snaps;
+    {
+        std::unique_lock<std::mutex> glock(gBucketsMx);
+        for (const auto &ka : gAgentBuckets) {
+            if (ka.first == msAgentName) continue;
+            if (!ka.second.hasTransform || ka.second.kf2bow.empty()) continue;
+            AgentRelocSnap s;
+            s.name     = ka.first;
+            s.T        = ka.second.T;
+            s.kf2descs = ka.second.kf2descs;   // shallow cv::Mat headers
+            s.kf2pts   = ka.second.kf2pts;
+            s.kf2bow   = ka.second.kf2bow;
+            snaps.push_back(std::move(s));
+        }
+    }
+    if (snaps.empty()) return false;
+
+    // ── 2) BoW scoring: pick top-K foreign keyframes across all agents ───────
+    struct KFCand { int snapIdx; int kf; double score; };
+    std::vector<KFCand> cands;
+    for (size_t si = 0; si < snaps.size(); ++si) {
+        for (const auto &kv : snaps[si].kf2bow) {
+            double sc = mpVoc->score(F.mBowVec, kv.second);
+            if (sc >= kForeignRelocBowFloor)
+                cands.push_back({(int)si, kv.first, sc});
+        }
+    }
+    if (cands.empty()) return false;
+
+    const size_t topK = std::min<size_t>(kForeignRelocTopK, cands.size());
+    std::partial_sort(cands.begin(), cands.begin()+topK, cands.end(),
+                      [](const KFCand &a, const KFCand &b){ return a.score > b.score; });
+    cands.resize(topK);
+
+    // ── 3) Descriptor matching: frame keypoints vs foreign HQ points ─────────
+    // Pool 2D-3D correspondences across the candidate KFs; keep the best match
+    // (lowest Hamming distance) per frame keypoint.
+    struct Corr { cv::Point3f p; float dist; int snapIdx; };
+    std::unordered_map<int, Corr> bestByKp;  // frame keypoint idx -> correspondence
+
+    cv::BFMatcher matcher(cv::NORM_HAMMING, false);
+
+    for (const auto &c : cands) {
+        const AgentRelocSnap &s = snaps[c.snapIdx];
+
+        auto itD = s.kf2descs.find(c.kf);
+        auto itP = s.kf2pts.find(c.kf);
+        if (itD == s.kf2descs.end() || itP == s.kf2pts.end()) continue;
+        if (itD->second.empty() || itD->second.size() != itP->second.size()) continue;
+
+        cv::Mat B = stack_rows(itD->second);
+        const std::vector<cv::Point3f> &P2v = itP->second;
+
+        std::vector<std::vector<cv::DMatch>> knn;
+        matcher.knnMatch(F.mDescriptors, B, knn, 2);
+
+        for (const auto &v : knn) {
+            if (v.size() < 2) continue;
+            const cv::DMatch &m = v[0];
+            if (m.distance > maxHam || m.distance > ratio * v[1].distance) continue;
+            if (m.trainIdx < 0 || m.trainIdx >= (int)P2v.size()) continue;
+
+            const cv::Point3f &pOther = P2v[m.trainIdx];
+            if (!finite3(pOther)) continue;
+
+            auto it = bestByKp.find(m.queryIdx);
+            if (it == bestByKp.end() || m.distance < it->second.dist)
+                bestByKp[m.queryIdx] = {apply_se3(s.T, pOther), m.distance, c.snapIdx};
+        }
+    }
+
+    if ((int)bestByKp.size() < kForeignRelocMinMatches) {
+        if (printLog)
+            std::cout << "[ForeignReloc] only " << bestByKp.size()
+                      << " 2D-3D matches (need " << kForeignRelocMinMatches << ")\n";
+        return false;
+    }
+
+    // ── 4) Pose estimation ────────────────────────────────────────────────────
+    // Preferred: metric 3D-3D alignment using frame depth — the same approach
+    // that fixed host-map relocalization (2D-3D PnP proved fragile on
+    // outlier-heavy matches under viewpoint change). Fallback: PnP when depth
+    // is unavailable for enough matches (e.g. monocular).
+    std::vector<cv::Point3f> obj;   // matched foreign points, in host world frame
+    std::vector<cv::Point2f> img;   // undistorted keypoint positions
+    std::vector<int> kpIdx;
+    std::vector<int> corrSnap;
+    obj.reserve(bestByKp.size());
+    img.reserve(bestByKp.size());
+    kpIdx.reserve(bestByKp.size());
+    corrSnap.reserve(bestByKp.size());
+
+    for (const auto &kv : bestByKp) {
+        obj.push_back(kv.second.p);
+        img.push_back(F.mvKeysUn[kv.first].pt);
+        kpIdx.push_back(kv.first);
+        corrSnap.push_back(kv.second.snapIdx);
+    }
+
+    cv::Mat rvec, tvec;
+    bool havePose = false;
+
+    // -- 4a) 3D-3D: frame keypoints unprojected through depth vs foreign points
+    {
+        std::vector<cv::Point3f> Pw, Pc;
+        Pw.reserve(obj.size());
+        Pc.reserve(obj.size());
+        for (size_t i = 0; i < obj.size(); ++i) {
+            const float z = F.mvDepth.empty() ? -1.0f : F.mvDepth[kpIdx[i]];
+            if (z <= 0) continue;
+            const cv::KeyPoint &kp = F.mvKeysUn[kpIdx[i]];
+            Pc.emplace_back((kp.pt.x - Frame::cx) * z * Frame::invfx,
+                            (kp.pt.y - Frame::cy) * z * Frame::invfy,
+                            z);
+            Pw.push_back(obj[i]);
+        }
+
+        cv::Mat Tcw44;
+        std::vector<int> d3Inliers;
+        if ((int)Pw.size() >= 12 &&
+            EstimateSE3_3D3D(Pw, Pc, Tcw44, d3Inliers, 0.10, 500, 12))
+        {
+            cv::Mat R64;
+            Tcw44(cv::Rect(0, 0, 3, 3)).convertTo(R64, CV_64F);
+            cv::Rodrigues(R64, rvec);
+            tvec = (cv::Mat_<double>(3, 1) << Tcw44.at<float>(0, 3),
+                                              Tcw44.at<float>(1, 3),
+                                              Tcw44.at<float>(2, 3));
+            havePose = true;
+            if (printLog)
+                std::cout << "[ForeignReloc] 3D-3D alignment: "
+                          << d3Inliers.size() << "/" << Pw.size() << " inliers\n";
+        }
+    }
+
+    // -- 4b) fallback: 2D-3D PnP (depth sparse or 3D-3D found no consensus)
+    if (!havePose) {
+        std::vector<int> inlierIdx;
+        bool ok = cv::solvePnPRansac(obj, img, F.mK, cv::Mat(), rvec, tvec,
+                                     false, 300, kForeignRelocReprojErr, 0.99,
+                                     inlierIdx, cv::SOLVEPNP_EPNP);
+        if (!ok || (int)inlierIdx.size() < kForeignRelocMinInliers) {
+            if (printLog)
+                std::cout << "[ForeignReloc] no pose (3D-3D failed, PnP inliers "
+                          << inlierIdx.size() << "/" << obj.size() << ")\n";
+            return false;
+        }
+        havePose = true;
+    }
+
+    // ── 5) Verification + refinement, mirroring the host path ────────────────
+    // Reproject ALL pooled correspondences at the candidate pose and keep those
+    // landing within the pixel threshold; refine on that set; verify again.
+    auto verify = [&](std::vector<int> &vVerified) {
+        vVerified.clear();
+        std::vector<cv::Point2f> proj;
+        cv::projectPoints(obj, rvec, tvec, F.mK, cv::Mat(), proj);
+        const float th2 = kForeignRelocReprojErr * kForeignRelocReprojErr;
+        cv::Mat R64;
+        cv::Rodrigues(rvec, R64);
+        for (size_t i = 0; i < obj.size(); ++i) {
+            // point must be in front of the camera
+            const double zc = R64.at<double>(2,0)*obj[i].x + R64.at<double>(2,1)*obj[i].y
+                            + R64.at<double>(2,2)*obj[i].z + tvec.at<double>(2);
+            if (zc <= 0) continue;
+            const float dx = proj[i].x - img[i].x;
+            const float dy = proj[i].y - img[i].y;
+            if (dx*dx + dy*dy < th2)
+                vVerified.push_back((int)i);
+        }
+    };
+
+    std::vector<int> verified;
+    verify(verified);
+    if ((int)verified.size() >= kForeignRelocMinInliers) {
+        std::vector<cv::Point3f> objV; objV.reserve(verified.size());
+        std::vector<cv::Point2f> imgV; imgV.reserve(verified.size());
+        for (int i : verified) { objV.push_back(obj[i]); imgV.push_back(img[i]); }
+        cv::solvePnP(objV, imgV, F.mK, cv::Mat(), rvec, tvec,
+                     true, cv::SOLVEPNP_ITERATIVE);
+        verify(verified);
+    }
+
+    if ((int)verified.size() < kForeignRelocMinInliers) {
+        if (printLog)
+            std::cout << "[ForeignReloc] pose rejected in verification ("
+                      << verified.size() << "/" << obj.size() << " reprojection inliers)\n";
+        return false;
+    }
+
+    // ── 6) Compose Tcw and fill result ───────────────────────────────────────
+    cv::Mat R;
+    cv::Rodrigues(rvec, R);
+
+    out.Tcw = cv::Mat::eye(4, 4, CV_32F);
+    for (int r = 0; r < 3; ++r) {
+        for (int col = 0; col < 3; ++col)
+            out.Tcw.at<float>(r, col) = (float)R.at<double>(r, col);
+        out.Tcw.at<float>(r, 3) = (float)tvec.at<double>(r);
+    }
+
+    // majority vote over the verified set decides which agent we credit
+    std::unordered_map<int, int> snapVotes;
+    for (int i : verified)
+        snapVotes[corrSnap[i]]++;
+    int majoritySnap = verified.empty() ? 0 : corrSnap[verified[0]];
+    int bestVotes = 0;
+    for (const auto &kv : snapVotes)
+        if (kv.second > bestVotes) { bestVotes = kv.second; majoritySnap = kv.first; }
+
+    out.inliers.clear();
+    out.inliers.reserve(verified.size());
+    for (int i : verified)
+        out.inliers.emplace_back(kpIdx[i], obj[i]);
+    out.agentName = snaps[majoritySnap].name;
+
+    std::cout << "[ForeignReloc] relocalized against agent " << out.agentName
+              << ": " << verified.size() << " verified inliers from "
+              << obj.size() << " matches\n";
+    return true;
 }
 
 

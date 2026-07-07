@@ -32,6 +32,7 @@
 
 #include"Optimizer.h"
 #include"PnPsolver.h"
+#include"HQmanager.h"
 
 #include<iostream>
 
@@ -156,6 +157,11 @@ void Tracking::SetLocalMapper(LocalMapping *pLocalMapper)
 void Tracking::SetLoopClosing(LoopClosing *pLoopClosing)
 {
     mpLoopClosing=pLoopClosing;
+}
+
+void Tracking::SetHQManager(HighQualityManager *pHQManager)
+{
+    mpHQManager = pHQManager;
 }
 
 void Tracking::SetViewer(Viewer *pViewer)
@@ -958,7 +964,9 @@ bool Tracking::TrackLocalMap()
 
     // Decide if the tracking was succesful
     // More restrictive if there was a relocalization recently
-    if(mCurrentFrame.mnId<mnLastRelocFrameId+mMaxFrames && mnMatchesInliers<50)
+    // Relaxed 50->40: the strict post-reloc demand often re-declared LOST
+    // immediately after a successful relocalization.
+    if(mCurrentFrame.mnId<mnLastRelocFrameId+mMaxFrames && mnMatchesInliers<40)
         return false;
 
     if(mnMatchesInliers<30)
@@ -1332,8 +1340,70 @@ void Tracking::UpdateLocalKeyFrames()
     }
 }
 
+// Brute-force descriptor matching between a candidate keyframe's map points and
+// the frame, without SearchByBoW's same-vocabulary-node restriction. Under
+// viewpoint/scale change, revisited features quantize into different vocabulary
+// nodes, so node-restricted matching returns ~0 even in well-mapped areas.
+static int SearchCandidateBruteForce(KeyFrame* pKF, Frame &F,
+                                     vector<MapPoint*> &vpMapPointMatches)
+{
+    vpMapPointMatches = vector<MapPoint*>(F.N,static_cast<MapPoint*>(NULL));
+
+    const vector<MapPoint*> vpMPsKF = pKF->GetMapPointMatches();
+
+    // stack descriptors of KF features that still hold a valid map point
+    cv::Mat kfDescs;
+    vector<MapPoint*> vpMPs;
+    kfDescs.reserve(vpMPsKF.size());
+    vpMPs.reserve(vpMPsKF.size());
+    for(size_t i=0; i<vpMPsKF.size(); i++)
+    {
+        MapPoint* pMP = vpMPsKF[i];
+        if(!pMP || pMP->isBad())
+            continue;
+        kfDescs.push_back(pKF->mDescriptors.row(i));
+        vpMPs.push_back(pMP);
+    }
+    if(kfDescs.rows < 15 || F.mDescriptors.empty())
+        return 0;
+
+    cv::BFMatcher matcher(cv::NORM_HAMMING, false);
+    vector<vector<cv::DMatch>> knn;
+    matcher.knnMatch(F.mDescriptors, kfDescs, knn, 2);
+
+    // Relaxed Hamming threshold (100): same rationale as the cross-agent
+    // matching — revisits at different viewpoints land in the 60-100 range.
+    const float fRatio = 0.75f;
+    const int nMaxHam = 100;
+
+    // keep the best frame keypoint per map point (avoid duplicate 3D points in PnP)
+    map<MapPoint*, pair<int,float>> bestPerMP;  // mp -> (frame kp idx, distance)
+    for(const auto &v : knn)
+    {
+        if(v.size() < 2)
+            continue;
+        const cv::DMatch &m = v[0];
+        if(m.distance > nMaxHam || m.distance > fRatio*v[1].distance)
+            continue;
+        MapPoint* pMP = vpMPs[m.trainIdx];
+        auto it = bestPerMP.find(pMP);
+        if(it == bestPerMP.end() || m.distance < it->second.second)
+            bestPerMP[pMP] = make_pair(m.queryIdx, m.distance);
+    }
+
+    int nmatches = 0;
+    for(const auto &kv : bestPerMP)
+    {
+        vpMapPointMatches[kv.second.first] = kv.first;
+        nmatches++;
+    }
+    return nmatches;
+}
+
 bool Tracking::Relocalization()
 {
+    mnRelocAttempts++;
+
     // Compute Bag of Words Vector
     mCurrentFrame.ComputeBoW();
 
@@ -1342,13 +1412,20 @@ bool Tracking::Relocalization()
     vector<KeyFrame*> vpCandidateKFs = mpKeyFrameDB->DetectRelocalizationCandidates(&mCurrentFrame);
 
     if(vpCandidateKFs.empty())
-        return false;
+    {
+        if(mnRelocAttempts % 30 == 0)
+            cout << "[Reloc] attempt " << mnRelocAttempts
+                 << ": no DB candidates" << endl;
+        return RelocalizationForeign();
+    }
 
     const int nKFs = vpCandidateKFs.size();
 
     // We perform first an ORB matching with each candidate
     // If enough matches are found we setup a PnP solver
-    ORBmatcher matcher(0.75,true);
+    // Ratio relaxed 0.75->0.8: revisits from different viewpoints were failing
+    // the 15-match gate before geometry was ever checked.
+    ORBmatcher matcher(0.8,true);
 
     vector<PnPsolver*> vpPnPsolvers;
     vpPnPsolvers.resize(nKFs);
@@ -1360,6 +1437,8 @@ bool Tracking::Relocalization()
     vbDiscarded.resize(nKFs);
 
     int nCandidates=0;
+    int nBestBoWMatches=0;   // diagnostics
+    int nBestBFMatches=-1;   // diagnostics: -1 = brute-force pass not run
 
     for(int i=0; i<nKFs; i++)
     {
@@ -1369,6 +1448,8 @@ bool Tracking::Relocalization()
         else
         {
             int nmatches = matcher.SearchByBoW(pKF,mCurrentFrame,vvpMapPointMatches[i]);
+            if(nmatches>nBestBoWMatches)
+                nBestBoWMatches = nmatches;
             if(nmatches<15)
             {
                 vbDiscarded[i] = true;
@@ -1377,17 +1458,58 @@ bool Tracking::Relocalization()
             else
             {
                 PnPsolver* pSolver = new PnPsolver(mCurrentFrame,vvpMapPointMatches[i]);
-                pSolver->SetRansacParameters(0.99,10,300,4,0.5,5.991);
+                // Relaxed floor (minInliers 6, epsilon 0.2): with 15-25 match
+                // candidates the old floor of max(10, eps*N) demanded ~half of
+                // all matches as inliers before ANY pose was returned. A pose
+                // seeded from 6 inliers still has to climb to 40 inliers via
+                // pose optimization + projection search to be accepted.
+                pSolver->SetRansacParameters(0.99,6,300,4,0.2,5.991);
                 vpPnPsolvers[i] = pSolver;
                 nCandidates++;
             }
         }
     }
 
+    // Fallback: SearchByBoW only compares descriptors inside the same
+    // vocabulary node, which collapses under viewpoint change even in
+    // well-mapped areas. If no candidate survived, retry them with
+    // unrestricted brute-force matching before giving up.
+    if(nCandidates==0)
+    {
+        nBestBFMatches = 0;
+        for(int i=0; i<nKFs; i++)
+        {
+            KeyFrame* pKF = vpCandidateKFs[i];
+            if(pKF->isBad())
+                continue;
+
+            int nmatches = SearchCandidateBruteForce(pKF,mCurrentFrame,vvpMapPointMatches[i]);
+            if(nmatches>nBestBFMatches)
+                nBestBFMatches = nmatches;
+            if(nmatches<15)
+                continue;
+
+            PnPsolver* pSolver = new PnPsolver(mCurrentFrame,vvpMapPointMatches[i]);
+            // Brute-force matches carry more outliers than SearchByBoW matches;
+            // same relaxed floor as the BoW path — downstream validation
+            // (pose optimization + 40-inlier acceptance) does the real gating.
+            pSolver->SetRansacParameters(0.99,6,300,4,0.2,5.991);
+            vpPnPsolvers[i] = pSolver;
+            vbDiscarded[i] = false;
+            nCandidates++;
+        }
+    }
+
+    const int nCandidatesLogged = nCandidates;  // diagnostics: candidates passing the match gate
+
     // Alternatively perform some iterations of P4P RANSAC
     // Until we found a camera pose supported by enough inliers
     bool bMatch = false;
     ORBmatcher matcher2(0.9,true);
+
+    int nBestGood = 0;      // diagnostics: best inlier count reached across candidates
+    int nPnPPoses = 0;      // diagnostics: how many RANSAC hypotheses were returned at all
+    int nBestConsensus = 0; // diagnostics: best RANSAC consensus even when below the floor
 
     while(nCandidates>0 && !bMatch)
     {
@@ -1404,6 +1526,9 @@ bool Tracking::Relocalization()
             PnPsolver* pSolver = vpPnPsolvers[i];
             cv::Mat Tcw = pSolver->iterate(5,bNoMore,vbInliers,nInliers);
 
+            if(pSolver->GetBestNumInliers()>nBestConsensus)
+                nBestConsensus = pSolver->GetBestNumInliers();
+
             // If Ransac reachs max. iterations discard keyframe
             if(bNoMore)
             {
@@ -1414,6 +1539,7 @@ bool Tracking::Relocalization()
             // If a Camera Pose is computed, optimize
             if(!Tcw.empty())
             {
+                nPnPPoses++;
                 Tcw.copyTo(mCurrentFrame.mTcw);
 
                 set<MapPoint*> sFound;
@@ -1432,6 +1558,9 @@ bool Tracking::Relocalization()
                 }
 
                 int nGood = Optimizer::PoseOptimization(&mCurrentFrame);
+
+                if(nGood>nBestGood)
+                    nBestGood = nGood;
 
                 if(nGood<10)
                     continue;
@@ -1473,8 +1602,13 @@ bool Tracking::Relocalization()
                 }
 
 
+                if(nGood>nBestGood)
+                    nBestGood = nGood;
+
                 // If the pose is supported by enough inliers stop ransacs and continue
-                if(nGood>=50)
+                // Relaxed 50->40: live RGB-D frames frequently reached 40-49
+                // inliers and were rejected.
+                if(nGood>=40)
                 {
                     bMatch = true;
                     break;
@@ -1483,16 +1617,309 @@ bool Tracking::Relocalization()
         }
     }
 
+    // ---- RGB-D rescue: metric 3D-3D alignment on the best-matched candidate ----
+    // EPnP needs ~6+ coherent 2D-3D inliers from 4-point samples; the depth
+    // sensor gives us 3D on the frame side too, so a rigid Umeyama RANSAC with
+    // 3-point samples and a metric threshold is far more robust at low match
+    // counts. Also serves as a diagnostic: if this ALSO finds no consensus,
+    // the matches are geometrically incoherent, not merely under-sampled.
+    int n3D3DInliers = -1;
+    if(!bMatch && mSensor!=System::MONOCULAR)
+    {
+        int iBest = -1;
+        int nBestCnt = 0;
+        for(int i=0; i<nKFs; i++)
+        {
+            if(!vpCandidateKFs[i] || vpCandidateKFs[i]->isBad())
+                continue;
+            if((int)vvpMapPointMatches[i].size()!=mCurrentFrame.N)
+                continue;
+            int cnt = 0;
+            for(int j=0; j<mCurrentFrame.N; j++)
+                if(vvpMapPointMatches[i][j])
+                    cnt++;
+            if(cnt>nBestCnt)
+            {
+                nBestCnt = cnt;
+                iBest = i;
+            }
+        }
+
+        if(iBest>=0 && nBestCnt>=15)
+        {
+            int nGoodDepth = 0;
+            if(RelocalizationDepthAlign(vpCandidateKFs[iBest], vvpMapPointMatches[iBest],
+                                        n3D3DInliers, nGoodDepth))
+            {
+                cout << "[Reloc] relocalized via 3D-3D depth alignment: "
+                     << nGoodDepth << " inliers (3D-3D consensus " << n3D3DInliers
+                     << ", attempt " << mnRelocAttempts << ")" << endl;
+                mnRelocAttempts = 0;
+                mnLastRelocFrameId = mCurrentFrame.mnId;
+                return true;
+            }
+            else if(nGoodDepth>nBestGood)
+                nBestGood = nGoodDepth;
+        }
+    }
+
     if(!bMatch)
     {
-        return false;
+        if(mnRelocAttempts % 30 == 0)
+        {
+            cout << "[Reloc] attempt " << mnRelocAttempts
+                 << ": frameFeat=" << mCurrentFrame.N
+                 << " DB candidates=" << nKFs
+                 << " passed gate=" << nCandidatesLogged
+                 << " bestBoWMatches=" << nBestBoWMatches;
+            if(nBestBFMatches>=0)
+                cout << " bestBFMatches=" << nBestBFMatches;
+            cout << " PnP poses=" << nPnPPoses
+                 << " PnP consensus=" << nBestConsensus
+                 << " 3D3D consensus=" << n3D3DInliers
+                 << " best inliers=" << nBestGood << " (need 40)"
+                 << " | curFrame=" << mCurrentFrame.mnId << " candKF(frame:kf)=";
+            for(int i=0; i<nKFs; i++)
+                cout << vpCandidateKFs[i]->mnFrameId << ":"
+                     << vpCandidateKFs[i]->mnId << " ";
+            cout << endl;
+        }
+        return RelocalizationForeign();
     }
     else
     {
+        cout << "[Reloc] relocalized against own map: " << nBestGood
+             << " inliers (attempt " << mnRelocAttempts << ")" << endl;
+        mnRelocAttempts = 0;
         mnLastRelocFrameId = mCurrentFrame.mnId;
         return true;
     }
 
+}
+
+bool Tracking::RelocalizationDepthAlign(KeyFrame* pKFCand,
+                                        const std::vector<MapPoint*> &vpMatches,
+                                        int &nInliers3D, int &nGood)
+{
+    nInliers3D = 0;
+    nGood = 0;
+
+    // Build 3D-3D correspondences: map point world position <-> frame
+    // camera-space point unprojected from the depth image.
+    vector<cv::Point3f> vPw, vPc;
+    vector<int> vIdx;
+    vPw.reserve(64); vPc.reserve(64); vIdx.reserve(64);
+
+    for(int i=0; i<mCurrentFrame.N; i++)
+    {
+        MapPoint* pMP = vpMatches[i];
+        if(!pMP || pMP->isBad())
+            continue;
+        const float z = mCurrentFrame.mvDepth[i];
+        if(z<=0)
+            continue;
+
+        const cv::KeyPoint &kp = mCurrentFrame.mvKeysUn[i];
+        vPc.emplace_back((kp.pt.x-Frame::cx)*z*Frame::invfx,
+                         (kp.pt.y-Frame::cy)*z*Frame::invfy,
+                         z);
+
+        cv::Mat Xw = pMP->GetWorldPos();
+        vPw.emplace_back(Xw.at<float>(0), Xw.at<float>(1), Xw.at<float>(2));
+        vIdx.push_back(i);
+    }
+
+    if((int)vPw.size()<12)
+        return false;
+
+    cv::Mat Tcw;
+    vector<int> vInliers;
+    const bool bOK = HighQualityManager::EstimateSE3_3D3D(vPw, vPc, Tcw, vInliers,
+                                                          0.10, 500, 12);
+    nInliers3D = (int)vInliers.size();
+    if(!bOK)
+        return false;
+
+    mCurrentFrame.SetPose(Tcw);
+
+    // keep only the rigid-consensus matches for pose optimization
+    fill(mCurrentFrame.mvpMapPoints.begin(), mCurrentFrame.mvpMapPoints.end(),
+         static_cast<MapPoint*>(NULL));
+    set<MapPoint*> sFound;
+    for(int id : vInliers)
+    {
+        mCurrentFrame.mvpMapPoints[vIdx[id]] = vpMatches[vIdx[id]];
+        sFound.insert(vpMatches[vIdx[id]]);
+    }
+
+    nGood = Optimizer::PoseOptimization(&mCurrentFrame);
+    if(nGood<10)
+        return false;
+
+    for(int io=0; io<mCurrentFrame.N; io++)
+        if(mCurrentFrame.mvbOutlier[io])
+            mCurrentFrame.mvpMapPoints[io]=static_cast<MapPoint*>(NULL);
+
+    // grow support by projecting the candidate KF's map points at the
+    // recovered pose, same as the standard relocalization path
+    if(nGood<40)
+    {
+        ORBmatcher matcherProj(0.9,true);
+        int nadditional = matcherProj.SearchByProjection(mCurrentFrame,pKFCand,sFound,10,100);
+        if(nGood+nadditional>=40)
+        {
+            nGood = Optimizer::PoseOptimization(&mCurrentFrame);
+            for(int io=0; io<mCurrentFrame.N; io++)
+                if(mCurrentFrame.mvbOutlier[io])
+                    mCurrentFrame.mvpMapPoints[io]=static_cast<MapPoint*>(NULL);
+        }
+    }
+
+    return nGood>=40;
+}
+
+bool Tracking::RelocalizationForeign()
+{
+    if(!mpHQManager || mbOnlyTracking)
+        return false;
+
+    // Throttle: the foreign path snapshots shared buckets and runs its own
+    // matching + PnP; trying it on every lost frame is wasteful.
+    if(mCurrentFrame.mnId < mnLastForeignRelocFrameId + 10)
+        return false;
+    mnLastForeignRelocFrameId = mCurrentFrame.mnId;
+
+    ForeignRelocResult fr;
+    if(!mpHQManager->RelocalizeAgainstForeign(mCurrentFrame, fr))
+        return false;
+
+    mCurrentFrame.SetPose(fr.Tcw);
+
+    // Discard any leftover map point associations from the failed standard
+    // relocalization attempts above: they were validated against poses that
+    // were ultimately rejected.
+    fill(mCurrentFrame.mvpMapPoints.begin(), mCurrentFrame.mvpMapPoints.end(),
+         static_cast<MapPoint*>(NULL));
+    fill(mCurrentFrame.mvbOutlier.begin(), mCurrentFrame.mvbOutlier.end(), false);
+
+    if(!CreateForeignRelocKeyFrame(fr.inliers))
+        return false;
+
+    cout << "[Reloc] relocalized using map of agent " << fr.agentName
+         << " (" << fr.inliers.size() << " foreign inliers)" << endl;
+    mnRelocAttempts = 0;
+    mnLastRelocFrameId = mCurrentFrame.mnId;
+    return true;
+}
+
+bool Tracking::CreateForeignRelocKeyFrame(const std::vector<std::pair<int,cv::Point3f>> &vForeign)
+{
+    // Validate before constructing the keyframe: a fresh KF has no spanning-tree
+    // parent, so it cannot be safely discarded with SetBadFlag afterwards.
+    int nUsable = 0;
+    for(const auto &pr : vForeign)
+        if(pr.first >= 0 && pr.first < mCurrentFrame.N)
+            nUsable++;
+    if(nUsable == 0)
+        return false;
+
+    if(!mpLocalMapper->SetNotStop(true))
+        return false;
+
+    KeyFrame* pKF = new KeyFrame(mCurrentFrame,mpMap,mpKeyFrameDB);
+
+    mpReferenceKF = pKF;
+    mCurrentFrame.mpReferenceKF = pKF;
+    mCurrentFrame.UpdatePoseMatrices();
+
+    // Instantiate the foreign PnP inliers as host MapPoints, synchronously
+    // wired to the new keyframe so TrackLocalMap sees valid observations on
+    // this very frame (LocalMapping's ProcessNewKeyFrame runs asynchronously).
+    for(const auto &pr : vForeign)
+    {
+        const int idx = pr.first;
+        if(idx < 0 || idx >= mCurrentFrame.N)
+            continue;
+        if(mCurrentFrame.mvpMapPoints[idx])
+            continue;
+
+        cv::Mat x3D = (cv::Mat_<float>(3,1) << pr.second.x, pr.second.y, pr.second.z);
+        MapPoint* pNewMP = new MapPoint(x3D,pKF,mpMap);
+        pNewMP->mbFromAgent = true;
+        pNewMP->AddObservation(pKF,idx);
+        pKF->AddMapPoint(pNewMP,idx);
+        pNewMP->ComputeDistinctiveDescriptors();
+        pNewMP->UpdateNormalAndDepth();
+        mpMap->AddMapPoint(pNewMP);
+        mCurrentFrame.mvpMapPoints[idx]=pNewMP;
+    }
+
+    // Same depth-seeding as CreateNewKeyFrame: gives tracking immediate local
+    // support around the recovered pose.
+    if(mSensor!=System::MONOCULAR)
+    {
+        vector<pair<float,int> > vDepthIdx;
+        vDepthIdx.reserve(mCurrentFrame.N);
+        for(int i=0; i<mCurrentFrame.N; i++)
+        {
+            float z = mCurrentFrame.mvDepth[i];
+            if(z>0)
+            {
+                vDepthIdx.push_back(make_pair(z,i));
+            }
+        }
+
+        if(!vDepthIdx.empty())
+        {
+            sort(vDepthIdx.begin(),vDepthIdx.end());
+
+            int nPoints = 0;
+            for(size_t j=0; j<vDepthIdx.size();j++)
+            {
+                int i = vDepthIdx[j].second;
+
+                bool bCreateNew = false;
+
+                MapPoint* pMP = mCurrentFrame.mvpMapPoints[i];
+                if(!pMP)
+                    bCreateNew = true;
+                else if(pMP->Observations()<1)
+                {
+                    bCreateNew = true;
+                    mCurrentFrame.mvpMapPoints[i] = static_cast<MapPoint*>(NULL);
+                }
+
+                if(bCreateNew)
+                {
+                    cv::Mat x3D = mCurrentFrame.UnprojectStereo(i);
+                    MapPoint* pNewMP = new MapPoint(x3D,pKF,mpMap);
+                    pNewMP->AddObservation(pKF,i);
+                    pKF->AddMapPoint(pNewMP,i);
+                    pNewMP->ComputeDistinctiveDescriptors();
+                    pNewMP->UpdateNormalAndDepth();
+                    mpMap->AddMapPoint(pNewMP);
+
+                    mCurrentFrame.mvpMapPoints[i]=pNewMP;
+                    nPoints++;
+                }
+                else
+                {
+                    nPoints++;
+                }
+
+                if(vDepthIdx[j].first>mThDepth && nPoints>100)
+                    break;
+            }
+        }
+    }
+
+    mpLocalMapper->InsertKeyFrame(pKF);
+    mpLocalMapper->SetNotStop(false);
+
+    mnLastKeyFrameId = mCurrentFrame.mnId;
+    mpLastKeyFrame = pKF;
+
+    return true;
 }
 
 void Tracking::Reset()
